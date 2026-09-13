@@ -1,14 +1,15 @@
 "use strict";
 
 /*
-Hardware Setup Manager local V1
+Hardware Setup Manager online multi-user branch
 - App state is the single source of truth for project metadata, active setup, and positions.
-- Persistence is isolated in the storage object using localStorage key hardwareSetupManagerData.
+- Persistence is isolated in the storage object and talks to the REST API.
 - Export JSON intentionally excludes UI-only state and empty positions.
 - Run generateDemoData() in the browser console if you want sample data for quick testing.
 */
 
-const STORAGE_KEY = "hardwareSetupManagerData";
+const API_BASE = "/api";
+const PROJECT_POLL_INTERVAL_MS = 3000;
 const POSITION_ROWS = 22;
 const POSITION_COLUMNS = 5;
 const DEFAULT_PROJECT_NAME = "Untitled Project";
@@ -137,25 +138,64 @@ const BOARD_UTILITY_CELLS = {
 };
 
 const storage = {
-    save(data) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(createStoredData(data)));
+    listProjects() {
+        return apiRequest("/projects");
     },
 
-    load() {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) {
-            return null;
-        }
-        return JSON.parse(raw);
+    createProject(data) {
+        return apiRequest("/projects", {
+            method: "POST",
+            body: data || {}
+        });
     },
 
-    clear() {
-        localStorage.removeItem(STORAGE_KEY);
+    loadProject(projectId) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}`);
+    },
+
+    updateProject(projectId, data) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}`, {
+            method: "PATCH",
+            body: data
+        });
+    },
+
+    deleteProject(projectId) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}`, {
+            method: "DELETE"
+        });
+    },
+
+    savePosition(projectId, setupType, positionId, data) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/setups/${encodeURIComponent(setupType)}/positions/${encodeURIComponent(positionId)}`, {
+            method: "PUT",
+            body: data
+        });
+    },
+
+    deletePosition(projectId, setupType, positionId, data) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/setups/${encodeURIComponent(setupType)}/positions/${encodeURIComponent(positionId)}`, {
+            method: "DELETE",
+            body: data
+        });
+    },
+
+    replaceSetup(projectId, setupType, data) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/setups/${encodeURIComponent(setupType)}`, {
+            method: "PUT",
+            body: data
+        });
+    },
+
+    getUpdates(projectId) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/updates`);
     }
 };
 
 let appState = createInitialState();
 let dom = {};
+let currentProjectId = null;
+let projectBrowserState = { projects: [], query: "" };
 let positionElements = new Map();
 let utilityElements = new Map();
 let editorContext = null;
@@ -169,17 +209,31 @@ let undoStack = [];
 let redoStack = [];
 let historySnapshot = null;
 const MAX_HISTORY_STEPS = 80;
+let metadataSaveTimer = null;
+let pollingTimer = null;
+let isApplyingRemoteUpdate = false;
+let lastProjectRevision = null;
 
-document.addEventListener("DOMContentLoaded", initializeApp);
+document.addEventListener("DOMContentLoaded", () => {
+    initializeApp().catch((error) => {
+        console.error(error);
+        setSaveIndicator("Offline", "error");
+        showToast("Server unavailable");
+    });
+});
 
-function initializeApp() {
+async function initializeApp() {
     cacheDom();
-    appState = loadFromLocalStorage() || createInitialState();
+    appState = createInitialState();
     historySnapshot = createHistorySnapshot(appState);
     createGrid();
     bindEvents();
-    renderApp();
-    setSaveIndicator("Saved locally", "saved");
+    const projectId = getProjectIdFromUrl();
+    if (projectId) {
+        await openProject(projectId, { pushUrl: false });
+    } else {
+        await showProjectBrowser({ pushUrl: false });
+    }
 }
 
 function cacheDom() {
@@ -199,9 +253,14 @@ function cacheDom() {
         exportButton: document.getElementById("exportButton"),
         helpButton: document.getElementById("helpButton"),
         newProjectButton: document.getElementById("newProjectButton"),
+        allProjectsButton: document.getElementById("allProjectsButton"),
+        newProjectBrowserButton: document.getElementById("newProjectBrowserButton"),
         copySelectionButton: document.getElementById("copySelectionButton"),
         pasteSelectionButton: document.getElementById("pasteSelectionButton"),
-
+        projectBrowser: document.getElementById("projectBrowser"),
+        projectSearch: document.getElementById("projectSearch"),
+        projectList: document.getElementById("projectList"),
+        workspace: document.querySelector(".workspace"),
         importFileInput: document.getElementById("importFileInput"),
         saveIndicator: document.getElementById("saveIndicator"),
         saveIndicatorText: document.getElementById("saveIndicatorText"),
@@ -260,9 +319,11 @@ function bindEvents() {
     dom.pasteSetupButton.addEventListener("click", pasteCopiedSetup);
     dom.copySelectionButton.addEventListener("click", copyBoardSelection);
     dom.pasteSelectionButton.addEventListener("click", () => pasteSelectionClipboard());
+    dom.allProjectsButton.addEventListener("click", () => showProjectBrowser());
+    dom.newProjectBrowserButton.addEventListener("click", createNewServerProject);
 
     dom.importButton.addEventListener("click", () => {
-        if (!isEditMode()) {
+        if (currentProjectId && !isEditMode()) {
             showToast("Switch to Edit mode to import");
             return;
         }
@@ -290,7 +351,13 @@ function bindEvents() {
 
     document.addEventListener("scroll", hidePositionContextMenu, true);
     window.addEventListener("resize", hidePositionContextMenu);
+    window.addEventListener("popstate", handlePopState);
+    document.addEventListener("visibilitychange", updatePollingState);
     document.addEventListener("pointerup", endPositionDragSelection);
+    dom.projectSearch.addEventListener("input", () => {
+        projectBrowserState.query = dom.projectSearch.value;
+        renderProjectBrowserList();
+    });
 
     document.addEventListener("keydown", (event) => {
         if (handleBoardKeyboardShortcut(event)) {
@@ -484,13 +551,339 @@ function renderApp() {
     renderPositionDetails();
 }
 
+async function apiRequest(path, options = {}) {
+    const requestOptions = {
+        method: options.method || "GET",
+        headers: {
+            "Accept": "application/json"
+        }
+    };
+
+    if (Object.prototype.hasOwnProperty.call(options, "body")) {
+        requestOptions.headers["Content-Type"] = "application/json";
+        requestOptions.body = JSON.stringify(options.body || {});
+    }
+
+    let response;
+    try {
+        response = await fetch(`${API_BASE}${path}`, requestOptions);
+    } catch (error) {
+        const networkError = new Error("Server unavailable");
+        networkError.status = 0;
+        throw networkError;
+    }
+
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!response.ok) {
+        const error = new Error(data && data.message ? data.message : "Request failed");
+        error.status = response.status;
+        error.data = data;
+        throw error;
+    }
+
+    return data;
+}
+
+function getProjectIdFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("project");
+    return /^\d+$/.test(id || "") ? id : null;
+}
+
+async function handlePopState() {
+    const projectId = getProjectIdFromUrl();
+    if (projectId) {
+        await openProject(projectId, { pushUrl: false });
+    } else {
+        await showProjectBrowser({ pushUrl: false });
+    }
+}
+
+function setEditorVisible(visible) {
+    dom.projectBrowser.hidden = visible;
+    dom.workspace.hidden = !visible;
+    dom.allProjectsButton.hidden = !visible;
+    dom.copySetupButton.hidden = !visible;
+    dom.pasteSetupButton.hidden = !visible;
+    dom.exportButton.hidden = !visible;
+    dom.hardwareSearch.closest(".search-field").hidden = !visible;
+    dom.setupTabs[0].parentElement.hidden = !visible;
+    document.body.classList.toggle("is-project-browser", !visible);
+
+    if (!visible) {
+        dom.projectNameText.textContent = "All Projects";
+        dom.projectNameButton.disabled = true;
+        dom.projectNameButton.title = "Open a project to edit its name";
+        dom.newProjectButton.disabled = false;
+        dom.importButton.disabled = false;
+        dom.newProjectButton.title = "Create a new project";
+        dom.importButton.title = "Import project JSON";
+    }
+}
+
+async function showProjectBrowser(options = {}) {
+    stopProjectPolling();
+    currentProjectId = null;
+    appState = createInitialState();
+    editorContext = null;
+    boardClipboard = null;
+    clearSelectionState();
+    setEditorVisible(false);
+    setSaveIndicator("Syncing...", "saving");
+
+    try {
+        const data = await storage.listProjects();
+        projectBrowserState.projects = data.projects || [];
+        renderProjectBrowserList();
+        setSaveIndicator("Online", "saved");
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+        showToast("Server unavailable");
+    }
+
+    if (options.pushUrl !== false) {
+        history.pushState({}, "", window.location.pathname);
+    }
+}
+
+function renderProjectBrowserList() {
+    const query = normalizeSearch(projectBrowserState.query);
+    const projects = projectBrowserState.projects.filter((project) => {
+        if (!query) {
+            return true;
+        }
+        return [
+            project.name,
+            project.ecuName,
+            project.harness,
+            project.partNumber
+        ].some((value) => normalizeSearch(value).includes(query));
+    });
+
+    dom.projectList.innerHTML = "";
+    if (!projects.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-projects";
+        empty.textContent = projectBrowserState.projects.length ? "No projects matched your search." : "No projects yet. Create or import a project to begin.";
+        dom.projectList.appendChild(empty);
+        return;
+    }
+
+    projects.forEach((project) => {
+        const card = document.createElement("article");
+        card.className = "project-card";
+
+        const main = document.createElement("button");
+        main.type = "button";
+        main.className = "project-card-main";
+        main.addEventListener("click", () => openProject(project.id));
+        main.innerHTML = `
+            <h2 class="project-card-title">${escapeHtml(project.name || DEFAULT_PROJECT_NAME)}</h2>
+            <div class="project-card-meta">
+                <span>${escapeHtml(project.ecuName || "No ECU")}</span>
+                <span>${escapeHtml(project.harness || "No harness")}</span>
+                <span>Updated ${escapeHtml(formatRelativeTime(project.updatedAt))}</span>
+            </div>
+        `;
+
+        const actions = document.createElement("div");
+        actions.className = "project-card-actions";
+        actions.append(
+            createProjectCardButton("Open", () => openProject(project.id)),
+            createProjectCardButton("Export", () => exportProjectById(project.id)),
+            createProjectCardButton("Delete", () => requestDeleteProject(project), "danger-button")
+        );
+
+        card.append(main, actions);
+        dom.projectList.appendChild(card);
+    });
+}
+
+function createProjectCardButton(label, handler, className = "secondary-button") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    return button;
+}
+
+async function openProject(projectId, options = {}) {
+    stopProjectPolling();
+    setSaveIndicator("Syncing...", "saving");
+
+    try {
+        const data = await storage.loadProject(projectId);
+        currentProjectId = String(data.project.id);
+        appState = normalizeState({
+            ...data.project,
+            activeSetup: appState.activeSetup,
+            interactionMode: "view"
+        });
+        lastProjectRevision = data.project.revision || null;
+        historySnapshot = createHistorySnapshot(appState);
+        undoStack = [];
+        redoStack = [];
+        editorContext = null;
+        boardClipboard = null;
+        clearSelectionState();
+        setEditorVisible(true);
+        renderApp();
+        setSaveIndicator("Saved", "saved");
+        startProjectPolling();
+        if (options.pushUrl !== false) {
+            history.pushState({ projectId: currentProjectId }, "", `${window.location.pathname}?project=${encodeURIComponent(currentProjectId)}`);
+        }
+    } catch (error) {
+        currentProjectId = null;
+        setSaveIndicator("Offline", "error");
+        showToast(error.status === 404 ? "Project not found" : "Server unavailable");
+        await showProjectBrowser({ pushUrl: options.pushUrl });
+    }
+}
+
+async function createNewServerProject() {
+    setSaveIndicator("Saving...", "saving");
+    try {
+        const data = await storage.createProject({ project: createInitialState().project });
+        showToast("Project created");
+        await openProject(data.project.id);
+        switchInteractionMode("edit");
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+        showToast("Failed to create project");
+    }
+}
+
+function requestDeleteProject(project) {
+    openModal(`
+        <div class="modal-header">
+            <div>
+                <h2 id="modalTitle">Delete "${escapeHtml(project.name || DEFAULT_PROJECT_NAME)}"?</h2>
+                <p class="modal-subtitle">This will permanently remove the project and all hardware positions.</p>
+            </div>
+            <button class="modal-close" type="button" data-modal-close aria-label="Close dialog">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-footer">
+            <button class="secondary-button" type="button" data-modal-close>Cancel</button>
+            <button class="danger-button" type="button" id="confirmDeleteProjectButton">Delete Project</button>
+        </div>
+    `);
+    bindModalCloseButtons();
+    document.getElementById("confirmDeleteProjectButton").addEventListener("click", async () => {
+        await deleteProject(project.id);
+        closeModal();
+    });
+}
+
+async function deleteProject(projectId) {
+    try {
+        await storage.deleteProject(projectId);
+        showToast("Project deleted");
+        if (String(projectId) === currentProjectId) {
+            await showProjectBrowser();
+        } else {
+            projectBrowserState.projects = projectBrowserState.projects.filter((project) => String(project.id) !== String(projectId));
+            renderProjectBrowserList();
+        }
+    } catch (error) {
+        showToast("Failed to delete project");
+    }
+}
+
+function startProjectPolling() {
+    stopProjectPolling();
+    updatePollingState();
+}
+
+function stopProjectPolling() {
+    window.clearInterval(pollingTimer);
+    pollingTimer = null;
+}
+
+function updatePollingState() {
+    stopProjectPolling();
+    if (!currentProjectId || document.visibilityState === "hidden") {
+        return;
+    }
+
+    pollingTimer = window.setInterval(pollProjectUpdates, PROJECT_POLL_INTERVAL_MS);
+}
+
+async function pollProjectUpdates() {
+    if (!currentProjectId || isApplyingRemoteUpdate || !dom.modalOverlay.hidden) {
+        return;
+    }
+    if (dom.projectInfoForm.contains(document.activeElement) || document.querySelector(".inline-editor")) {
+        return;
+    }
+
+    try {
+        const updates = await storage.getUpdates(currentProjectId);
+        if (lastProjectRevision && updates.revision === lastProjectRevision) {
+            return;
+        }
+        const data = await storage.loadProject(currentProjectId);
+        applyRemoteProject(data.project);
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+    }
+}
+
+function applyRemoteProject(projectData) {
+    if (!projectData || String(projectData.id) !== String(currentProjectId)) {
+        return;
+    }
+
+    isApplyingRemoteUpdate = true;
+    appState = normalizeState({
+        ...projectData,
+        activeSetup: appState.activeSetup,
+        interactionMode: appState.interactionMode
+    });
+    lastProjectRevision = projectData.revision || lastProjectRevision;
+    clearSelectionState();
+    editorContext = null;
+    renderApp();
+    setSaveIndicator("Synced", "saved");
+    isApplyingRemoteUpdate = false;
+}
+
+function formatRelativeTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return "recently";
+    }
+
+    const seconds = Math.max(1, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (seconds < 60) {
+        return "just now";
+    }
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) {
+        return `${minutes} min ago`;
+    }
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+        return `${hours} hr ago`;
+    }
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 function renderProjectName() {
     if (dom.projectNameRegion.querySelector(".project-name-form")) {
         return;
     }
 
     dom.projectNameText.textContent = normalizeString(appState.project.name) || DEFAULT_PROJECT_NAME;
-    dom.projectNameButton.disabled = !isEditMode();
+    dom.projectNameButton.disabled = currentProjectId ? !isEditMode() : true;
     dom.projectNameButton.title = isEditMode() ? "Edit project name" : "Switch to Edit mode to edit project name";
 }
 
@@ -525,12 +918,13 @@ function renderInteractionMode() {
     });
 
     const editing = isEditMode();
+    const browsing = !currentProjectId;
     dom.projectNameButton.disabled = !editing;
     dom.projectNameButton.title = editing ? "Edit project name" : "Switch to Edit mode to edit project name";
-    dom.importButton.disabled = !editing;
-    dom.newProjectButton.disabled = !editing;
-    dom.importButton.title = editing ? "Import project JSON" : "Switch to Edit mode to import";
-    dom.newProjectButton.title = editing ? "Create a new project" : "Switch to Edit mode to create a new project";
+    dom.importButton.disabled = currentProjectId ? !editing : false;
+    dom.newProjectButton.disabled = currentProjectId ? !editing : false;
+    dom.importButton.title = browsing || editing ? "Import project JSON" : "Switch to Edit mode to import";
+    dom.newProjectButton.title = browsing || editing ? "Create a new project" : "Switch to Edit mode to create a new project";
 }
 
 function isEditMode() {
@@ -1459,6 +1853,9 @@ function pasteSelectionAt(targetPositionId) {
     const positions = getActivePositions();
     let pastedCount = 0;
     const pastedIds = [];
+    const savedIds = [];
+    const deletedIds = [];
+    const deleteRevisionMap = {};
 
     boardClipboard.cells.forEach((cell) => {
         const row = target.row + cell.rowOffset;
@@ -1468,12 +1865,17 @@ function pasteSelectionAt(targetPositionId) {
             return;
         }
 
+        const revision = getPositionRevision(appState.activeSetup, destinationId);
         if (cell.items.length) {
             positions[destinationId] = {
-                items: cloneItems(cell.items)
+                items: cloneItems(cell.items),
+                revision
             };
+            savedIds.push(destinationId);
         } else {
+            deleteRevisionMap[destinationId] = revision;
             delete positions[destinationId];
+            deletedIds.push(destinationId);
         }
 
         cleanupPosition(destinationId);
@@ -1493,7 +1895,12 @@ function pasteSelectionAt(targetPositionId) {
     appState.selectionAnchor = targetId || appState.selectedPositions[0] || null;
 
     hideTooltip();
-    saveToLocalStorage();
+    if (savedIds.length) {
+        persistPositionsToServer(savedIds);
+    }
+    if (deletedIds.length) {
+        persistDeletedPositionsToServer(deletedIds, deleteRevisionMap);
+    }
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -1619,7 +2026,10 @@ function setPositionsToQuickType(positionIds, type) {
 
     const positions = getActivePositions();
     ids.forEach((positionId) => {
-        positions[positionId] = { items: [createQuickItem(type)] };
+        positions[positionId] = {
+            items: [createQuickItem(type)],
+            revision: getPositionRevision(appState.activeSetup, positionId)
+        };
         cleanupPosition(positionId);
     });
 
@@ -1629,7 +2039,7 @@ function setPositionsToQuickType(positionIds, type) {
     appState.selectedRange = createSelectionRangeFromPositionIds(ids);
     appState.selectionAnchor = ids[0];
     hideTooltip();
-    saveToLocalStorage();
+    persistPositionsToServer(ids);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -1644,7 +2054,9 @@ function clearPositions(positionIds) {
     }
 
     const positions = getActivePositions();
+    const revisionMap = {};
     ids.forEach((positionId) => {
+        revisionMap[positionId] = getPositionRevision(appState.activeSetup, positionId);
         delete positions[positionId];
     });
 
@@ -1654,7 +2066,7 @@ function clearPositions(positionIds) {
     appState.selectedRange = createSelectionRangeFromPositionIds(ids);
     appState.selectionAnchor = ids[0];
     hideTooltip();
-    saveToLocalStorage();
+    persistDeletedPositionsToServer(ids, revisionMap);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -1664,9 +2076,10 @@ function clearPositions(positionIds) {
 function quickToggleSinglePresetPosition(positionId, type) {
     const positions = getActivePositions();
     const items = getPositionItems(positionId);
+    const revision = getPositionRevision(appState.activeSetup, positionId);
 
     if (!items.length) {
-        positions[positionId] = { items: [createQuickItem(type)] };
+        positions[positionId] = { items: [createQuickItem(type)], revision };
         persistPositionChange(positionId);
         return true;
     }
@@ -1686,9 +2099,10 @@ function quickToggleSinglePresetPosition(positionId, type) {
 function quickToggleSwitchPosition(positionId) {
     const positions = getActivePositions();
     const items = getPositionItems(positionId);
+    const revision = getPositionRevision(appState.activeSetup, positionId);
 
     if (!items.length) {
-        positions[positionId] = { items: [createQuickItem("mechanicalSwitch")] };
+        positions[positionId] = { items: [createQuickItem("mechanicalSwitch")], revision };
         persistPositionChange(positionId);
         return true;
     }
@@ -1710,7 +2124,7 @@ function quickToggleSwitchPosition(positionId) {
     const nextItem = isQuickItem(items[0], items[0].type)
         ? createQuickItem(nextType)
         : { ...items[0], type: nextType };
-    positions[positionId] = { items: [nextItem] };
+    positions[positionId] = { items: [nextItem], revision };
     persistPositionChange(positionId);
     return true;
 }
@@ -1724,7 +2138,7 @@ function persistPositionChange(positionId) {
     }
     cleanupPosition(positionId);
     hideTooltip();
-    saveToLocalStorage();
+    persistPositionsToServer([positionId]);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -1740,7 +2154,6 @@ function switchSetup(setupName) {
     appState.selectedPosition = null;
     editorContext = null;
     clearSelectionState();
-    saveToLocalStorage();
     renderApp();
     resetDetailsScroll();
 }
@@ -1757,7 +2170,6 @@ function switchInteractionMode(mode) {
         editorContext = null;
         clearSelectionState();
     }
-    saveToLocalStorage();
     renderInteractionMode();
     renderProjectName();
     renderProjectInfo();
@@ -2012,6 +2424,7 @@ function addSensorOptionToPositions(positionIds, displayName) {
 
     const positions = getActivePositions();
     ids.forEach((positionId) => {
+        const revision = getPositionRevision(appState.activeSetup, positionId);
         const existing = positions[positionId] && Array.isArray(positions[positionId].items)
             ? normalizeItems(positions[positionId].items)
             : [];
@@ -2025,7 +2438,8 @@ function addSensorOptionToPositions(positionIds, displayName) {
         positions[positionId] = {
             items: existing.length && existing.every((item) => item.type === "sensor")
                 ? [...existing, sensorItem]
-                : [sensorItem]
+                : [sensorItem],
+            revision
         };
         cleanupPosition(positionId);
     });
@@ -2036,7 +2450,7 @@ function addSensorOptionToPositions(positionIds, displayName) {
     appState.selectedRange = createSelectionRangeFromPositionIds(ids);
     appState.selectionAnchor = ids[0];
     hideTooltip();
-    saveToLocalStorage();
+    persistPositionsToServer(ids);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -2164,7 +2578,6 @@ function openHardwareEditor(options) {
         appState.interactionMode = "edit";
         appState.selectedRange = null;
         renderInteractionMode();
-        saveToLocalStorage();
     }
 
     editorContext = {
@@ -2358,13 +2771,14 @@ function saveHardware(event) {
     }
 
     positions[savedPositionId] = {
-        items: normalizeItems(position.items)
+        items: normalizeItems(position.items),
+        revision: getPositionRevision(appState.activeSetup, savedPositionId)
     };
 
     cleanupPosition(savedPositionId);
     appState.selectedPosition = savedPositionId;
     editorContext = null;
-    saveToLocalStorage();
+    persistPositionsToServer([savedPositionId]);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -2373,11 +2787,14 @@ function saveHardware(event) {
 
 function clearPosition(positionId) {
     const positions = getActivePositions();
+    const revisionMap = {
+        [positionId]: getPositionRevision(appState.activeSetup, positionId)
+    };
     delete positions[positionId];
     editorContext = null;
     focusAfterHardwareChange(positionId);
     hideTooltip();
-    saveToLocalStorage();
+    persistDeletedPositionsToServer([positionId], revisionMap);
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -2391,12 +2808,17 @@ function removeSensor(positionId, index) {
         return;
     }
 
+    const revision = getPositionRevision(appState.activeSetup, positionId);
     position.items.splice(index, 1);
     cleanupPosition(positionId);
     editorContext = null;
     focusAfterHardwareChange(positionId);
     hideTooltip();
-    saveToLocalStorage();
+    if (getActivePositions()[positionId]) {
+        persistPositionsToServer([positionId]);
+    } else {
+        persistDeletedPositionsToServer([positionId], { [positionId]: revision });
+    }
     renderGrid();
     renderPositionDetails();
     resetDetailsScroll();
@@ -2439,9 +2861,17 @@ function cleanupPosition(positionId) {
         return;
     }
 
+    const revision = Number(positions[positionId].revision);
+    const updatedAt = positions[positionId].updatedAt || "";
     positions[positionId] = {
         items: normalizeItems(positions[positionId].items)
     };
+    if (Number.isInteger(revision) && revision > 0) {
+        positions[positionId].revision = revision;
+    }
+    if (updatedAt) {
+        positions[positionId].updatedAt = updatedAt;
+    }
 
     if (!positions[positionId].items.length) {
         delete positions[positionId];
@@ -2500,6 +2930,95 @@ function toggleCanChannel(channelKey) {
 function getPositionItems(positionId) {
     const position = getActivePositions()[positionId];
     return position && Array.isArray(position.items) ? position.items : [];
+}
+
+function getPositionRevision(setupType, positionId) {
+    const setup = getSetupByName(setupType);
+    const position = setup.positions[positionId];
+    return position && Number.isInteger(position.revision) ? position.revision : null;
+}
+
+function applyServerPosition(position) {
+    if (!position || !SETUP_LABELS[position.setupType] || !isValidPositionId(position.positionId)) {
+        return;
+    }
+
+    const setup = getSetupByName(position.setupType);
+    setup.positions[position.positionId] = {
+        items: normalizeItems(position.items),
+        revision: Number(position.revision) || 1,
+        updatedAt: position.updatedAt || ""
+    };
+}
+
+async function persistPositionsToServer(positionIds, setupType = appState.activeSetup) {
+    if (!currentProjectId) {
+        return;
+    }
+
+    recordHistorySnapshot();
+    setSaveIndicator("Saving...", "saving");
+    try {
+        for (const positionId of normalizeSelectedPositionIds(positionIds)) {
+            const items = getSetupByName(setupType).positions[positionId]
+                ? normalizeItems(getSetupByName(setupType).positions[positionId].items)
+                : [];
+            const data = await storage.savePosition(currentProjectId, setupType, positionId, {
+                items,
+                revision: getPositionRevision(setupType, positionId) || 0
+            });
+            if (data && data.position) {
+                applyServerPosition(data.position);
+            }
+        }
+        setSaveIndicator("Saved", "saved");
+    } catch (error) {
+        await handlePositionSaveError(error);
+    }
+}
+
+async function persistDeletedPositionsToServer(positionIds, revisionMap = {}, setupType = appState.activeSetup) {
+    if (!currentProjectId) {
+        return;
+    }
+
+    recordHistorySnapshot();
+    setSaveIndicator("Saving...", "saving");
+    try {
+        for (const positionId of normalizeSelectedPositionIds(positionIds)) {
+            await storage.deletePosition(currentProjectId, setupType, positionId, {
+                revision: revisionMap[positionId] == null ? 0 : revisionMap[positionId]
+            });
+        }
+        setSaveIndicator("Saved", "saved");
+    } catch (error) {
+        await handlePositionSaveError(error);
+    }
+}
+
+async function handlePositionSaveError(error) {
+    if (error.status === 409) {
+        setSaveIndicator("Conflict", "error");
+        showToast("Conflict detected");
+        await reloadCurrentProject();
+        return;
+    }
+
+    setSaveIndicator("Failed to save", "error");
+    showToast(error.status === 0 ? "Server unavailable" : "Failed to save");
+}
+
+async function reloadCurrentProject() {
+    if (!currentProjectId) {
+        return;
+    }
+
+    try {
+        const data = await storage.loadProject(currentProjectId);
+        applyRemoteProject(data.project);
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+    }
 }
 
 function getCanonicalEditablePositionId(row, column) {
@@ -2892,15 +3411,23 @@ function openPasteSetupConfirmation() {
     });
 }
 
-function applySetupPaste() {
+async function applySetupPaste() {
     appState.setups[appState.activeSetup] = cloneSetup(boardClipboard.setup);
     appState.selectedPosition = null;
     editorContext = null;
     clearSelectionState();
     hideTooltip();
-    saveToLocalStorage();
     renderApp();
-    showToast("Setup pasted");
+    setSaveIndicator("Saving...", "saving");
+    try {
+        const data = await storage.replaceSetup(currentProjectId, appState.activeSetup, appState.setups[appState.activeSetup]);
+        appState.setups[appState.activeSetup] = normalizeSetup(data.setup);
+        await reloadCurrentProject();
+        showToast("Setup pasted");
+    } catch (error) {
+        setSaveIndicator("Failed to save", "error");
+        showToast("Failed to save");
+    }
 }
 
 async function copyTextToClipboard(text) {
@@ -2937,6 +3464,21 @@ function fallbackCopyText(text) {
 
 function exportProject() {
     const data = createExportData(appState);
+    downloadProjectJson(data);
+    showToast("Project exported");
+}
+
+async function exportProjectById(projectId) {
+    try {
+        const data = await storage.loadProject(projectId);
+        downloadProjectJson(createExportData(normalizeState(data.project)));
+        showToast("Project exported");
+    } catch (error) {
+        showToast("Failed to export project");
+    }
+}
+
+function downloadProjectJson(data) {
     const content = JSON.stringify(data, null, 2);
     const blob = new Blob([content], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2949,14 +3491,13 @@ function exportProject() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    showToast("Project exported");
 }
 
 function importProject(event) {
     const file = event.target.files && event.target.files[0];
     event.target.value = "";
 
-    if (!isEditMode()) {
+    if (currentProjectId && !isEditMode()) {
         showToast("Switch to Edit mode to import");
         return;
     }
@@ -2968,7 +3509,7 @@ function importProject(event) {
     const reader = new FileReader();
 
     reader.onerror = () => showToast("Invalid setup file");
-    reader.onload = () => {
+    reader.onload = async () => {
         try {
             const data = JSON.parse(String(reader.result));
             const normalized = validateImportedData(data);
@@ -2978,15 +3519,10 @@ function importProject(event) {
                 return;
             }
 
-            appState = normalized;
-            appState.selectedPosition = null;
-            editorContext = null;
-            clearSelectionState();
-            appState.searchQuery = "";
-            boardClipboard = null;
-            saveToLocalStorage();
-            renderApp();
+            setSaveIndicator("Saving...", "saving");
+            const created = await storage.createProject(createExportData(normalized));
             showToast("Project imported");
+            await openProject(created.project.id);
         } catch (error) {
             showToast("Invalid setup file");
         }
@@ -3037,7 +3573,7 @@ function openUsageGuide() {
                 </section>
                 <section class="guide-section">
                     <h3>Local data</h3>
-                    <p>Your current project autosaves to browser localStorage. Export JSON for backup or sharing, and Import JSON to restore a saved project.</p>
+                    <p>Projects autosave to the shared server database. Export JSON for backup or sharing, and Import JSON to create a new shared project.</p>
                 </section>
             </div>
         </div>
@@ -3079,13 +3615,8 @@ function validateImportedData(data) {
 }
 
 function requestNewProject() {
-    if (!isEditMode()) {
+    if (currentProjectId && !isEditMode()) {
         showToast("Switch to Edit mode to create a new project");
-        return;
-    }
-
-    if (!hasProjectData()) {
-        resetProject();
         return;
     }
 
@@ -3093,7 +3624,7 @@ function requestNewProject() {
         <div class="modal-header">
             <div>
                 <h2 id="modalTitle">Create a new project?</h2>
-                <p class="modal-subtitle">Your current project is saved locally. Export it first if you want a separate backup.</p>
+                <p class="modal-subtitle">This creates a new shared project on the server. Export the current one first if you want a separate JSON backup.</p>
             </div>
             <button class="modal-close" type="button" data-modal-close aria-label="Close dialog">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -3112,18 +3643,13 @@ function requestNewProject() {
         button.addEventListener("click", closeModal);
     });
     document.getElementById("confirmNewProjectButton").addEventListener("click", () => {
-        resetProject();
+        createNewServerProject();
         closeModal();
     });
 }
 
 function resetProject() {
-    appState = createInitialState();
-    boardClipboard = null;
-    editorContext = null;
-    hideTooltip();
-    saveToLocalStorage();
-    renderApp();
+    createNewServerProject();
 }
 
 function saveToLocalStorage(options = {}) {
@@ -3131,17 +3657,50 @@ function saveToLocalStorage(options = {}) {
         recordHistorySnapshot();
     }
 
-    setSaveIndicator("Saving...", "saving");
+    scheduleProjectSave();
+}
 
-    try {
-        storage.save(appState);
-        window.clearTimeout(saveIndicatorTimer);
-        saveIndicatorTimer = window.setTimeout(() => {
-            setSaveIndicator("Saved locally", "saved");
-        }, 180);
-    } catch (error) {
-        setSaveIndicator("Unable to save locally", "error");
+function scheduleProjectSave() {
+    if (!currentProjectId || isApplyingRemoteUpdate) {
+        return;
     }
+
+    setSaveIndicator("Saving...", "saving");
+    window.clearTimeout(metadataSaveTimer);
+    metadataSaveTimer = window.setTimeout(flushProjectSave, 700);
+}
+
+async function flushProjectSave() {
+    if (!currentProjectId || isApplyingRemoteUpdate) {
+        return;
+    }
+
+    const projectId = currentProjectId;
+    try {
+        const data = await storage.updateProject(projectId, buildProjectSavePayload());
+        if (String(projectId) === String(currentProjectId) && data && data.project) {
+            lastProjectRevision = data.project.revision || lastProjectRevision;
+        }
+        setSaveIndicator("Saved", "saved");
+    } catch (error) {
+        setSaveIndicator("Failed to save", "error");
+        showToast("Failed to save");
+    }
+}
+
+function buildProjectSavePayload() {
+    return {
+        project: normalizeProject(appState.project),
+        boardOptions: normalizeBoardOptions(appState.boardOptions),
+        setups: {
+            checkpoint: {
+                canChannels: normalizeCanChannels(appState.setups.checkpoint && appState.setups.checkpoint.canChannels)
+            },
+            container: {
+                canChannels: normalizeCanChannels(appState.setups.container && appState.setups.container.canChannels)
+            }
+        }
+    };
 }
 
 function createHistorySnapshot(state) {
@@ -3189,9 +3748,27 @@ function restoreHistorySnapshot(snapshot) {
     editorContext = null;
     clearSelectionState();
     historySnapshot = createHistorySnapshot(appState);
-    saveToLocalStorage({ skipHistory: true });
+    persistFullProjectReplacement();
     renderApp();
     return true;
+}
+
+async function persistFullProjectReplacement() {
+    if (!currentProjectId) {
+        return;
+    }
+
+    setSaveIndicator("Saving...", "saving");
+    try {
+        await storage.updateProject(currentProjectId, buildProjectSavePayload());
+        await storage.replaceSetup(currentProjectId, "checkpoint", appState.setups.checkpoint);
+        await storage.replaceSetup(currentProjectId, "container", appState.setups.container);
+        await reloadCurrentProject();
+        setSaveIndicator("Saved", "saved");
+    } catch (error) {
+        setSaveIndicator("Failed to save", "error");
+        showToast("Failed to save");
+    }
 }
 
 function undoLastChange() {
@@ -3221,15 +3798,7 @@ function redoLastChange() {
 }
 
 function loadFromLocalStorage() {
-    try {
-        const data = storage.load();
-        if (!data) {
-            return null;
-        }
-        return normalizeState(data);
-    } catch (error) {
-        return null;
-    }
+    return null;
 }
 
 function setSaveIndicator(text, state) {
@@ -3251,8 +3820,19 @@ function createExportData(data) {
     return {
         version: 1,
         project: normalized.project,
-        setups: normalized.setups,
+        setups: {
+            checkpoint: createPortableSetup(normalized.setups.checkpoint),
+            container: createPortableSetup(normalized.setups.container)
+        },
         boardOptions: normalized.boardOptions
+    };
+}
+
+function createPortableSetup(setup) {
+    const normalized = normalizeSetup(setup);
+    return {
+        positions: clonePositions(normalized.positions),
+        canChannels: normalizeCanChannels(normalized.canChannels)
     };
 }
 
@@ -3367,7 +3947,14 @@ function normalizePositions(positions) {
         const sourcePosition = positions[positionId];
         const items = normalizeItems(sourcePosition && sourcePosition.items);
         if (items.length) {
+            const revision = Number(sourcePosition && sourcePosition.revision);
             normalized[positionId] = { items };
+            if (Number.isInteger(revision) && revision > 0) {
+                normalized[positionId].revision = revision;
+            }
+            if (sourcePosition && sourcePosition.updatedAt) {
+                normalized[positionId].updatedAt = normalizeString(sourcePosition.updatedAt);
+            }
         }
     });
 

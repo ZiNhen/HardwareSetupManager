@@ -44,6 +44,13 @@
                             </button>
                         </label>
 
+                        <button class="action-button" id="allProjectsButton" type="button" hidden>
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M19 12H5"></path>
+                                <path d="m12 19-7-7 7-7"></path>
+                            </svg>
+                            <span>All Projects</span>
+                        </button>
                         <button class="action-button" id="copySetupButton" type="button">
                             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
                                 <rect x="8" y="8" width="11" height="11" rx="2"></rect>
@@ -99,6 +106,35 @@
                 <span id="saveIndicatorText">Saved locally</span>
             </div>
         </header>
+
+        <main class="project-browser" id="projectBrowser" aria-label="Project browser" hidden>
+            <section class="project-browser-card" aria-labelledby="projectBrowserTitle">
+                <div class="project-browser-header">
+                    <div>
+                        <p class="section-kicker">Projects</p>
+                        <h1 id="projectBrowserTitle">Hardware Setup Manager</h1>
+                        <p class="project-browser-subtitle">Open, create, import, export, and manage shared setup projects.</p>
+                    </div>
+                    <button class="action-button primary" id="newProjectBrowserButton" type="button">
+                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 5v14"></path>
+                            <path d="M5 12h14"></path>
+                        </svg>
+                        <span>New Project</span>
+                    </button>
+                </div>
+
+                <label class="search-field project-search-field" for="projectSearch">
+                    <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="11" cy="11" r="7"></circle>
+                        <path d="m16.5 16.5 4 4"></path>
+                    </svg>
+                    <input id="projectSearch" type="search" autocomplete="off" placeholder="Search projects...">
+                </label>
+
+                <div class="project-list" id="projectList" aria-live="polite"></div>
+            </section>
+        </main>
 
         <main class="workspace" aria-label="Hardware setup workspace">
             <section class="panel project-panel" aria-labelledby="projectInfoTitle">

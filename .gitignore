@@ -1,0 +1,8 @@
+.restore_tmp
+node_modules/
+.env
+data/*.db
+data/*.db-shm
+data/*.db-wal
+backups/*
+!backups/.gitkeep
