@@ -10,6 +10,7 @@ Hardware Setup Manager online multi-user branch
 
 const API_BASE = "/api";
 const PROJECT_POLL_INTERVAL_MS = 3000;
+const PROJECT_BROWSER_POLL_INTERVAL_MS = 5000;
 const POSITION_ROWS = 22;
 const POSITION_COLUMNS = 5;
 const DEFAULT_PROJECT_NAME = "Untitled Project";
@@ -235,6 +236,7 @@ let historySnapshot = null;
 const MAX_HISTORY_STEPS = 80;
 let metadataSaveTimer = null;
 let pollingTimer = null;
+let projectBrowserPollingTimer = null;
 let isApplyingRemoteUpdate = false;
 let lastProjectRevision = null;
 
@@ -385,7 +387,10 @@ function bindEvents() {
     document.addEventListener("scroll", hidePositionContextMenu, true);
     window.addEventListener("resize", hidePositionContextMenu);
     window.addEventListener("popstate", handlePopState);
-    document.addEventListener("visibilitychange", updatePollingState);
+    document.addEventListener("visibilitychange", () => {
+        updatePollingState();
+        updateProjectBrowserPollingState();
+    });
     document.addEventListener("pointerup", endPositionDragSelection);
     dom.projectSearch.addEventListener("input", () => {
         projectBrowserState.query = dom.projectSearch.value;
@@ -683,6 +688,7 @@ async function showProjectBrowser(options = {}) {
         projectBrowserState.projects = projectData.projects || [];
         projectBrowserState.folders = folderData.folders || [];
         renderProjectBrowserList();
+        startProjectBrowserPolling();
         setSaveIndicator("Online", "saved");
     } catch (error) {
         setSaveIndicator("Offline", "error");
@@ -743,6 +749,20 @@ function renderProjectBrowserList() {
 function renderProjectBrowserPath(currentFolder) {
     const path = document.createElement("div");
     path.className = "project-browser-path";
+
+    if (currentFolder) {
+        const back = document.createElement("button");
+        back.type = "button";
+        back.className = "project-back-button";
+        back.innerHTML = `
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m15 18-6-6 6-6"></path>
+            </svg>
+            <span>Back</span>
+        `;
+        back.addEventListener("click", () => openBrowserFolder(null));
+        path.appendChild(back);
+    }
 
     const root = document.createElement("button");
     root.type = "button";
@@ -1232,6 +1252,7 @@ async function moveProjectToFolder(projectId, folderId) {
 }
 
 async function openProject(projectId, options = {}) {
+    stopProjectBrowserPolling();
     stopProjectPolling();
     setSaveIndicator("Syncing...", "saving");
 
@@ -1332,6 +1353,47 @@ function startProjectPolling() {
 function stopProjectPolling() {
     window.clearInterval(pollingTimer);
     pollingTimer = null;
+}
+
+function startProjectBrowserPolling() {
+    stopProjectBrowserPolling();
+    updateProjectBrowserPollingState();
+}
+
+function stopProjectBrowserPolling() {
+    window.clearInterval(projectBrowserPollingTimer);
+    projectBrowserPollingTimer = null;
+}
+
+function updateProjectBrowserPollingState() {
+    stopProjectBrowserPolling();
+    if (currentProjectId || dom.projectBrowser.hidden || document.visibilityState === "hidden") {
+        return;
+    }
+
+    projectBrowserPollingTimer = window.setInterval(refreshProjectBrowserItems, PROJECT_BROWSER_POLL_INTERVAL_MS);
+}
+
+async function refreshProjectBrowserItems() {
+    if (currentProjectId || dom.projectBrowser.hidden || !dom.modalOverlay.hidden) {
+        return;
+    }
+
+    try {
+        const [projectData, folderData] = await Promise.all([
+            storage.listProjects(),
+            storage.listFolders()
+        ]);
+        projectBrowserState.projects = projectData.projects || [];
+        projectBrowserState.folders = folderData.folders || [];
+        if (projectBrowserState.currentFolderId && !getBrowserCurrentFolder()) {
+            projectBrowserState.currentFolderId = null;
+        }
+        renderProjectBrowserList();
+        setSaveIndicator("Online", "saved");
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+    }
 }
 
 function updatePollingState() {
@@ -4088,7 +4150,7 @@ function openUsageGuide() {
             <div class="guide-list">
                 <section class="guide-section">
                     <h3>Project Browser</h3>
-                    <p>Folders and projects behave like a lightweight file explorer. Click once to select, double-click or press Enter to open, press F2 to rename, press Delete to remove, right-click for actions, and drag a project onto a folder to move it.</p>
+                    <p>Folders and projects behave like a lightweight file explorer. Use Back to return to All Projects, click once to select, double-click or press Enter to open, press F2 to rename, press Delete to remove, right-click for actions, and drag a project onto a folder to move it. The browser refreshes automatically while it is open.</p>
                 </section>
                 <section class="guide-section">
                     <h3>View mode</h3>

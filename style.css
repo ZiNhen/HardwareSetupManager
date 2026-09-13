@@ -495,6 +495,33 @@ textarea:focus-visible,
     font-weight: 720;
 }
 
+.project-back-button {
+    min-height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text-primary);
+    cursor: pointer;
+    padding: 7px 11px 7px 9px;
+    font-size: 0.86rem;
+    font-weight: 760;
+    transition: background var(--transition), border-color var(--transition), color var(--transition);
+}
+
+.project-back-button:hover {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.project-back-button .icon {
+    width: 15px;
+    height: 15px;
+}
+
 .project-path-button {
     border-radius: 999px;
     background: var(--surface-secondary);
