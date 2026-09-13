@@ -138,6 +138,30 @@ const BOARD_UTILITY_CELLS = {
 };
 
 const storage = {
+    listFolders() {
+        return apiRequest("/folders");
+    },
+
+    createFolder(data) {
+        return apiRequest("/folders", {
+            method: "POST",
+            body: data || {}
+        });
+    },
+
+    updateFolder(folderId, data) {
+        return apiRequest(`/folders/${encodeURIComponent(folderId)}`, {
+            method: "PATCH",
+            body: data || {}
+        });
+    },
+
+    deleteFolder(folderId) {
+        return apiRequest(`/folders/${encodeURIComponent(folderId)}`, {
+            method: "DELETE"
+        });
+    },
+
     listProjects() {
         return apiRequest("/projects");
     },
@@ -195,7 +219,7 @@ const storage = {
 let appState = createInitialState();
 let dom = {};
 let currentProjectId = null;
-let projectBrowserState = { projects: [], query: "" };
+let projectBrowserState = { projects: [], folders: [], query: "", currentFolderId: null, selectedItem: null };
 let positionElements = new Map();
 let utilityElements = new Map();
 let editorContext = null;
@@ -254,6 +278,7 @@ function cacheDom() {
         helpButton: document.getElementById("helpButton"),
         newProjectButton: document.getElementById("newProjectButton"),
         allProjectsButton: document.getElementById("allProjectsButton"),
+        newFolderButton: document.getElementById("newFolderButton"),
         newProjectBrowserButton: document.getElementById("newProjectBrowserButton"),
         copySelectionButton: document.getElementById("copySelectionButton"),
         pasteSelectionButton: document.getElementById("pasteSelectionButton"),
@@ -309,7 +334,7 @@ function bindEvents() {
             const trimmed = normalizeString(field.value);
             appState.project[key] = trimmed;
             field.value = trimmed;
-            saveToLocalStorage();
+            flushProjectSaveNow();
         });
     });
 
@@ -323,7 +348,11 @@ function bindEvents() {
     dom.pasteSetupButton.addEventListener("click", pasteCopiedSetup);
     dom.copySelectionButton.addEventListener("click", copyBoardSelection);
     dom.pasteSelectionButton.addEventListener("click", () => pasteSelectionClipboard());
-    dom.allProjectsButton.addEventListener("click", () => showProjectBrowser());
+    dom.allProjectsButton.addEventListener("click", () => {
+        projectBrowserState.currentFolderId = null;
+        showProjectBrowser();
+    });
+    dom.newFolderButton.addEventListener("click", openNewFolderModal);
     dom.newProjectBrowserButton.addEventListener("click", createNewServerProject);
 
     dom.importButton.addEventListener("click", () => {
@@ -364,6 +393,10 @@ function bindEvents() {
     });
 
     document.addEventListener("keydown", (event) => {
+        if (handleProjectBrowserKeyboardShortcut(event)) {
+            return;
+        }
+
         if (handleBoardKeyboardShortcut(event)) {
             return;
         }
@@ -611,6 +644,7 @@ function setEditorVisible(visible) {
     dom.copySetupButton.hidden = !visible;
     dom.pasteSetupButton.hidden = !visible;
     dom.exportButton.hidden = !visible;
+    dom.newProjectButton.hidden = visible;
     if (dom.hardwareSearch) {
         dom.hardwareSearch.closest(".search-field").hidden = !visible;
     }
@@ -621,6 +655,7 @@ function setEditorVisible(visible) {
         dom.projectNameText.textContent = "All Projects";
         dom.projectNameButton.disabled = true;
         dom.projectNameButton.title = "Open a project to edit its name";
+        dom.newProjectButton.hidden = false;
         dom.newProjectButton.disabled = false;
         dom.importButton.disabled = false;
         dom.newProjectButton.title = "Create a new project";
@@ -641,8 +676,12 @@ async function showProjectBrowser(options = {}) {
     setSaveIndicator("Syncing...", "saving");
 
     try {
-        const data = await storage.listProjects();
-        projectBrowserState.projects = data.projects || [];
+        const [projectData, folderData] = await Promise.all([
+            storage.listProjects(),
+            storage.listFolders()
+        ]);
+        projectBrowserState.projects = projectData.projects || [];
+        projectBrowserState.folders = folderData.folders || [];
         renderProjectBrowserList();
         setSaveIndicator("Online", "saved");
     } catch (error) {
@@ -657,64 +696,539 @@ async function showProjectBrowser(options = {}) {
 
 function renderProjectBrowserList() {
     const query = normalizeSearch(projectBrowserState.query);
-    const projects = projectBrowserState.projects.filter((project) => {
-        if (!query) {
-            return true;
+    const currentFolder = getBrowserCurrentFolder();
+    const folders = projectBrowserState.folders.filter((folder) => {
+        if (projectBrowserState.currentFolderId && !query) {
+            return false;
         }
-        return [
+        return !query || normalizeSearch(folder.name).includes(query);
+    });
+    const projects = projectBrowserState.projects.filter((project) => {
+        const folderName = getFolderName(project.folderId);
+        const matchesQuery = !query || [
             project.name,
             project.ecuName,
             project.harness,
-            project.partNumber
+            project.partNumber,
+            folderName
         ].some((value) => normalizeSearch(value).includes(query));
+        const matchesFolder = query
+            ? true
+            : String(project.folderId || "") === String(projectBrowserState.currentFolderId || "");
+        return matchesQuery && matchesFolder;
     });
 
     dom.projectList.innerHTML = "";
-    if (!projects.length) {
+    renderProjectBrowserPath(currentFolder);
+
+    if (!folders.length && !projects.length) {
         const empty = document.createElement("div");
         empty.className = "empty-projects";
-        empty.textContent = projectBrowserState.projects.length ? "No projects matched your search." : "No projects yet. Create or import a project to begin.";
+        empty.textContent = projectBrowserState.projects.length || projectBrowserState.folders.length
+            ? "No items matched your search."
+            : "No projects yet. Create a folder or project to begin.";
         dom.projectList.appendChild(empty);
         return;
     }
 
-    projects.forEach((project) => {
-        const card = document.createElement("article");
-        card.className = "project-card";
+    if (folders.length) {
+        renderProjectGroup(query ? "Matching folders" : "Folders", folders.map(createFolderCard));
+    }
 
-        const main = document.createElement("button");
-        main.type = "button";
-        main.className = "project-card-main";
-        main.addEventListener("click", () => openProject(project.id));
-        main.innerHTML = `
+    if (projects.length) {
+        renderProjectGroup(query ? "Matching projects" : "Projects", projects.map(createProjectCard));
+    }
+}
+
+function renderProjectBrowserPath(currentFolder) {
+    const path = document.createElement("div");
+    path.className = "project-browser-path";
+
+    const root = document.createElement("button");
+    root.type = "button";
+    root.className = "project-path-button";
+    root.textContent = "All Projects";
+    root.addEventListener("click", () => openBrowserFolder(null));
+    root.addEventListener("dragover", (event) => event.preventDefault());
+    root.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        const projectId = event.dataTransfer.getData("text/project-id");
+        if (projectId) {
+            await moveProjectToFolder(projectId, null);
+        }
+    });
+    path.appendChild(root);
+
+    if (currentFolder) {
+        const separator = document.createElement("span");
+        separator.className = "project-path-separator";
+        separator.textContent = "/";
+        const current = document.createElement("span");
+        current.className = "project-path-current";
+        current.textContent = currentFolder.name;
+        path.append(separator, current);
+    }
+
+    dom.projectList.appendChild(path);
+}
+
+function renderProjectGroup(title, items) {
+    const group = document.createElement("section");
+    group.className = "project-group";
+
+    const header = document.createElement("div");
+    header.className = "project-group-header";
+    header.innerHTML = `
+        <span class="project-group-title">${escapeHtml(title)}</span>
+        <span class="project-group-count">${items.length}</span>
+    `;
+    group.appendChild(header);
+    items.forEach((item) => group.appendChild(item));
+    dom.projectList.appendChild(group);
+}
+
+function createFolderCard(folder) {
+    const card = createBrowserItemCard("folder", folder.id);
+    card.classList.add("project-folder-card");
+    card.addEventListener("dblclick", () => openBrowserFolder(folder.id));
+    card.addEventListener("contextmenu", (event) => openFolderContextMenu(event, folder));
+    card.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        card.classList.add("is-drop-target");
+    });
+    card.addEventListener("dragleave", () => card.classList.remove("is-drop-target"));
+    card.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        card.classList.remove("is-drop-target");
+        const projectId = event.dataTransfer.getData("text/project-id");
+        if (projectId) {
+            await moveProjectToFolder(projectId, folder.id);
+        }
+    });
+
+    const count = getProjectCountInFolder(folder.id);
+    card.innerHTML = `
+        <div class="project-item-icon" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+            </svg>
+        </div>
+        <div class="project-card-main">
+            <h2 class="project-card-title">${escapeHtml(folder.name)}</h2>
+            <div class="project-card-meta">
+                <span>${count} project${count === 1 ? "" : "s"}</span>
+                <span>Updated ${escapeHtml(formatRelativeTime(folder.updatedAt))}</span>
+            </div>
+        </div>
+        <div class="project-card-actions">
+            ${renderInlineActionMarkup("Open")}
+            ${renderInlineActionMarkup("Rename")}
+        </div>
+    `;
+    bindInlineAction(card, "Open", () => openBrowserFolder(folder.id));
+    bindInlineAction(card, "Rename", () => openRenameFolderModal(folder));
+    return card;
+}
+
+function createProjectCard(project) {
+    const card = createBrowserItemCard("project", project.id);
+    card.draggable = true;
+    card.addEventListener("dblclick", () => openProject(project.id));
+    card.addEventListener("contextmenu", (event) => openProjectContextMenu(event, project));
+    card.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData("text/project-id", String(project.id));
+        event.dataTransfer.effectAllowed = "move";
+    });
+
+    card.innerHTML = `
+        <div class="project-item-icon" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24">
+                <path d="M6 3h8l4 4v14H6z"></path>
+                <path d="M14 3v5h5"></path>
+            </svg>
+        </div>
+        <div class="project-card-main">
             <h2 class="project-card-title">${escapeHtml(project.name || DEFAULT_PROJECT_NAME)}</h2>
             <div class="project-card-meta">
                 <span>${escapeHtml(project.ecuName || "No ECU")}</span>
                 <span>${escapeHtml(project.harness || "No harness")}</span>
+                <span>${escapeHtml(getFolderName(project.folderId) || "Root")}</span>
                 <span>Updated ${escapeHtml(formatRelativeTime(project.updatedAt))}</span>
             </div>
-        `;
+        </div>
+        <div class="project-card-actions">
+            ${renderInlineActionMarkup("Open")}
+            ${renderInlineActionMarkup("Export")}
+        </div>
+    `;
+    bindInlineAction(card, "Open", () => openProject(project.id));
+    bindInlineAction(card, "Export", () => exportProjectById(project.id));
+    return card;
+}
 
-        const actions = document.createElement("div");
-        actions.className = "project-card-actions";
-        actions.append(
-            createProjectCardButton("Open", () => openProject(project.id)),
-            createProjectCardButton("Export", () => exportProjectById(project.id)),
-            createProjectCardButton("Delete", () => requestDeleteProject(project), "danger-button")
-        );
+function createBrowserItemCard(kind, id) {
+    const card = document.createElement("article");
+    card.className = "project-card project-browser-item";
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.dataset.browserKind = kind;
+    card.dataset.browserId = String(id);
+    card.addEventListener("click", () => selectProjectBrowserItem(kind, id));
+    card.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") {
+            return;
+        }
+        if (kind === "folder") {
+            openBrowserFolder(id);
+        } else {
+            openProject(id);
+        }
+    });
+    return card;
+}
 
-        card.append(main, actions);
-        dom.projectList.appendChild(card);
+function renderInlineActionMarkup(label) {
+    return `<button class="secondary-button" type="button" data-inline-action="${escapeAttribute(label)}">${escapeHtml(label)}</button>`;
+}
+
+function bindInlineAction(card, label, handler) {
+    const button = card.querySelector(`[data-inline-action="${CSS.escape(label)}"]`);
+    if (!button) {
+        return;
+    }
+    button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        handler();
     });
 }
 
-function createProjectCardButton(label, handler, className = "secondary-button") {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = className;
-    button.textContent = label;
-    button.addEventListener("click", handler);
-    return button;
+function selectProjectBrowserItem(kind, id) {
+    projectBrowserState.selectedItem = { kind, id: String(id) };
+    renderProjectBrowserSelection();
+}
+
+function renderProjectBrowserSelection() {
+    Array.from(dom.projectList.querySelectorAll(".project-browser-item")).forEach((item) => {
+        const selected = projectBrowserState.selectedItem
+            && item.dataset.browserKind === projectBrowserState.selectedItem.kind
+            && item.dataset.browserId === projectBrowserState.selectedItem.id;
+        item.classList.toggle("is-selected", Boolean(selected));
+    });
+}
+
+function getBrowserCurrentFolder() {
+    if (!projectBrowserState.currentFolderId) {
+        return null;
+    }
+    return projectBrowserState.folders.find((folder) => String(folder.id) === String(projectBrowserState.currentFolderId)) || null;
+}
+
+function getFolderName(folderId) {
+    if (!folderId) {
+        return "";
+    }
+    const folder = projectBrowserState.folders.find((item) => String(item.id) === String(folderId));
+    return folder ? folder.name : "";
+}
+
+function getProjectCountInFolder(folderId) {
+    return projectBrowserState.projects.filter((project) => String(project.folderId || "") === String(folderId || "")).length;
+}
+
+function projectStateToBrowserSummary(projectState) {
+    const project = projectState && projectState.project ? projectState.project : {};
+    return {
+        id: projectState.id,
+        folderId: projectState.folderId || null,
+        name: project.name || DEFAULT_PROJECT_NAME,
+        harness: project.harness || "",
+        ecuName: project.ecuName || "",
+        partNumber: project.partNumber || "",
+        updatedAt: projectState.updatedAt || new Date().toISOString()
+    };
+}
+
+function openBrowserFolder(folderId) {
+    projectBrowserState.currentFolderId = folderId ? String(folderId) : null;
+    projectBrowserState.selectedItem = null;
+    renderProjectBrowserList();
+}
+
+function getSelectedBrowserItem() {
+    if (!projectBrowserState.selectedItem || dom.projectBrowser.hidden) {
+        return null;
+    }
+
+    if (projectBrowserState.selectedItem.kind === "folder") {
+        const folder = projectBrowserState.folders.find((item) => String(item.id) === projectBrowserState.selectedItem.id);
+        return folder ? { kind: "folder", value: folder } : null;
+    }
+
+    const project = projectBrowserState.projects.find((item) => String(item.id) === projectBrowserState.selectedItem.id);
+    return project ? { kind: "project", value: project } : null;
+}
+
+function handleProjectBrowserKeyboardShortcut(event) {
+    if (dom.projectBrowser.hidden || !projectBrowserState.selectedItem || !["Enter", "F2", "Delete"].includes(event.key)) {
+        return false;
+    }
+
+    const selected = getSelectedBrowserItem();
+    if (!selected) {
+        return false;
+    }
+
+    event.preventDefault();
+    if (event.key === "Enter") {
+        if (selected.kind === "folder") {
+            openBrowserFolder(selected.value.id);
+        } else {
+            openProject(selected.value.id);
+        }
+        return true;
+    }
+
+    if (event.key === "F2") {
+        if (selected.kind === "folder") {
+            openRenameFolderModal(selected.value);
+        } else {
+            openRenameProjectModal(selected.value);
+        }
+        return true;
+    }
+
+    if (selected.kind === "folder") {
+        requestDeleteFolder(selected.value);
+    } else {
+        requestDeleteProject(selected.value);
+    }
+    return true;
+}
+
+function openFolderContextMenu(event, folder) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectProjectBrowserItem("folder", folder.id);
+    renderPositionContextMenu([
+        {
+            label: "Open",
+            handler: () => openBrowserFolder(folder.id)
+        },
+        {
+            label: "Rename",
+            handler: () => openRenameFolderModal(folder)
+        },
+        {
+            label: "Delete Folder",
+            className: "is-danger",
+            handler: () => requestDeleteFolder(folder)
+        }
+    ]);
+    placePositionContextMenu(event.clientX, event.clientY);
+}
+
+function openProjectContextMenu(event, project) {
+    event.preventDefault();
+    event.stopPropagation();
+    selectProjectBrowserItem("project", project.id);
+    const moveOptions = [
+        {
+            label: "Root",
+            handler: () => moveProjectToFolder(project.id, null)
+        },
+        ...projectBrowserState.folders.map((folder) => ({
+            label: folder.name,
+            handler: () => moveProjectToFolder(project.id, folder.id)
+        }))
+    ];
+    renderPositionContextMenu([
+        {
+            label: "Open",
+            handler: () => openProject(project.id)
+        },
+        {
+            label: "Rename",
+            handler: () => openRenameProjectModal(project)
+        },
+        {
+            label: "Move To",
+            submenu: moveOptions
+        },
+        {
+            label: "Export",
+            handler: () => exportProjectById(project.id)
+        },
+        {
+            label: "Delete Project",
+            className: "is-danger",
+            handler: () => requestDeleteProject(project)
+        }
+    ]);
+    placePositionContextMenu(event.clientX, event.clientY);
+}
+
+function openNewFolderModal() {
+    openFolderNameModal({
+        title: "New Folder",
+        subtitle: "Create a folder to group sub-projects.",
+        actionLabel: "Create Folder",
+        fieldLabel: "Folder Name",
+        initialValue: "",
+        onSubmit: async (name) => {
+            const data = await storage.createFolder({ name });
+            projectBrowserState.folders.push(data.folder);
+            projectBrowserState.folders.sort((a, b) => a.name.localeCompare(b.name));
+            showToast("Folder created");
+            closeModal();
+            renderProjectBrowserList();
+        }
+    });
+}
+
+function openRenameFolderModal(folder) {
+    openFolderNameModal({
+        title: "Rename Folder",
+        subtitle: "Update the folder name. Projects inside it will stay in place.",
+        actionLabel: "Save",
+        fieldLabel: "Folder Name",
+        initialValue: folder.name,
+        onSubmit: async (name) => {
+            const data = await storage.updateFolder(folder.id, { name });
+            const index = projectBrowserState.folders.findIndex((item) => String(item.id) === String(folder.id));
+            if (index >= 0) {
+                projectBrowserState.folders[index] = data.folder;
+            }
+            projectBrowserState.folders.sort((a, b) => a.name.localeCompare(b.name));
+            showToast("Folder renamed");
+            closeModal();
+            renderProjectBrowserList();
+        }
+    });
+}
+
+function openFolderNameModal(options) {
+    openModal(`
+        <div class="modal-header">
+            <div>
+                <h2 id="modalTitle">${escapeHtml(options.title)}</h2>
+                <p class="modal-subtitle">${escapeHtml(options.subtitle)}</p>
+            </div>
+            <button class="modal-close" type="button" data-modal-close aria-label="Close dialog">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                </svg>
+            </button>
+        </div>
+        <form class="modal-form" id="folderForm">
+            <div class="modal-body">
+                <label class="modal-field">
+                    <span>${escapeHtml(options.fieldLabel || "Name")}</span>
+                    <input id="folderNameInput" type="text" autocomplete="off" value="${escapeAttribute(options.initialValue || "")}" required>
+                </label>
+                <div class="form-error" id="folderFormError" role="alert"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="secondary-button" type="button" data-modal-close>Cancel</button>
+                <button class="action-button primary" type="submit">${escapeHtml(options.actionLabel)}</button>
+            </div>
+        </form>
+    `);
+    bindModalCloseButtons();
+
+    const form = document.getElementById("folderForm");
+    const input = document.getElementById("folderNameInput");
+    const error = document.getElementById("folderFormError");
+    input.focus();
+    input.select();
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const name = normalizeString(input.value);
+        if (!name) {
+            error.textContent = "Folder name is required.";
+            input.focus();
+            return;
+        }
+        try {
+            await options.onSubmit(name);
+        } catch (errorResponse) {
+            error.textContent = "Folder could not be saved.";
+        }
+    });
+}
+
+function openRenameProjectModal(project) {
+    openFolderNameModal({
+        title: "Rename Project",
+        subtitle: "Update the project name.",
+        actionLabel: "Save",
+        fieldLabel: "Project Name",
+        initialValue: project.name || DEFAULT_PROJECT_NAME,
+        onSubmit: async (name) => {
+            const data = await storage.updateProject(project.id, { project: { name } });
+            const index = projectBrowserState.projects.findIndex((item) => String(item.id) === String(project.id));
+            if (index >= 0) {
+                projectBrowserState.projects[index] = projectStateToBrowserSummary(data.project);
+            }
+            showToast("Project renamed");
+            closeModal();
+            renderProjectBrowserList();
+        }
+    });
+}
+
+function requestDeleteFolder(folder) {
+    const count = getProjectCountInFolder(folder.id);
+    openModal(`
+        <div class="modal-header">
+            <div>
+                <h2 id="modalTitle">Delete "${escapeHtml(folder.name)}"?</h2>
+                <p class="modal-subtitle">${count ? `${count} project${count === 1 ? "" : "s"} will move back to Root.` : "This folder is empty."}</p>
+            </div>
+            <button class="modal-close" type="button" data-modal-close aria-label="Close dialog">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                </svg>
+            </button>
+        </div>
+        <div class="modal-footer">
+            <button class="secondary-button" type="button" data-modal-close>Cancel</button>
+            <button class="danger-button" type="button" id="confirmDeleteFolderButton">Delete Folder</button>
+        </div>
+    `);
+    bindModalCloseButtons();
+    document.getElementById("confirmDeleteFolderButton").addEventListener("click", async () => {
+        try {
+            await storage.deleteFolder(folder.id);
+            projectBrowserState.folders = projectBrowserState.folders.filter((item) => String(item.id) !== String(folder.id));
+            projectBrowserState.projects = projectBrowserState.projects.map((project) => (
+                String(project.folderId || "") === String(folder.id) ? { ...project, folderId: null } : project
+            ));
+            if (String(projectBrowserState.currentFolderId || "") === String(folder.id)) {
+                projectBrowserState.currentFolderId = null;
+            }
+            showToast("Folder deleted");
+            closeModal();
+            renderProjectBrowserList();
+        } catch (error) {
+            showToast("Failed to delete folder");
+        }
+    });
+}
+
+async function moveProjectToFolder(projectId, folderId) {
+    try {
+        const data = await storage.updateProject(projectId, { folderId: folderId || null });
+        const index = projectBrowserState.projects.findIndex((project) => String(project.id) === String(projectId));
+        if (index >= 0) {
+            projectBrowserState.projects[index] = projectStateToBrowserSummary(data.project);
+        }
+        renderProjectBrowserList();
+        showToast(folderId ? "Project moved" : "Project moved to Root");
+    } catch (error) {
+        showToast("Failed to move project");
+    }
 }
 
 async function openProject(projectId, options = {}) {
@@ -756,7 +1270,10 @@ async function openProject(projectId, options = {}) {
 async function createNewServerProject() {
     setSaveIndicator("Saving...", "saving");
     try {
-        const data = await storage.createProject({ project: createInitialState().project });
+        const data = await storage.createProject({
+            project: createInitialState().project,
+            folderId: projectBrowserState.currentFolderId || null
+        });
         showToast("Project created");
         await openProject(data.project.id);
         switchInteractionMode("edit");
@@ -932,7 +1449,8 @@ function renderInteractionMode() {
     dom.projectNameButton.disabled = !editing;
     dom.projectNameButton.title = editing ? "Edit project name" : "Switch to Edit mode to edit project name";
     dom.importButton.disabled = currentProjectId ? !editing : false;
-    dom.newProjectButton.disabled = currentProjectId ? !editing : false;
+    dom.newProjectButton.hidden = Boolean(currentProjectId);
+    dom.newProjectButton.disabled = currentProjectId ? true : false;
     dom.importButton.title = browsing || editing ? "Import project JSON" : "Switch to Edit mode to import";
     dom.newProjectButton.title = browsing || editing ? "Create a new project" : "Switch to Edit mode to create a new project";
 }
@@ -3538,7 +4056,10 @@ function importProject(event) {
             }
 
             setSaveIndicator("Saving...", "saving");
-            const created = await storage.createProject(createExportData(normalized));
+            const created = await storage.createProject({
+                ...createExportData(normalized),
+                folderId: projectBrowserState.currentFolderId || null
+            });
             showToast("Project imported");
             await openProject(created.project.id);
         } catch (error) {
@@ -3565,6 +4086,10 @@ function openUsageGuide() {
         </div>
         <div class="modal-body">
             <div class="guide-list">
+                <section class="guide-section">
+                    <h3>Project Browser</h3>
+                    <p>Folders and projects behave like a lightweight file explorer. Click once to select, double-click or press Enter to open, press F2 to rename, press Delete to remove, right-click for actions, and drag a project onto a folder to move it.</p>
+                </section>
                 <section class="guide-section">
                     <h3>View mode</h3>
                     <p>Click any grid cell to inspect its details. View mode does not change hardware data.</p>
@@ -3686,6 +4211,11 @@ function scheduleProjectSave() {
     setSaveIndicator("Saving...", "saving");
     window.clearTimeout(metadataSaveTimer);
     metadataSaveTimer = window.setTimeout(flushProjectSave, 700);
+}
+
+function flushProjectSaveNow() {
+    window.clearTimeout(metadataSaveTimer);
+    return flushProjectSave();
 }
 
 async function flushProjectSave() {
@@ -4354,7 +4884,7 @@ function saveProjectNameEdit() {
     const name = normalizeString(input.value) || DEFAULT_PROJECT_NAME;
     appState.project.name = name;
     restoreProjectNameButton();
-    saveToLocalStorage();
+    flushProjectSaveNow();
     renderProjectName();
 }
 

@@ -101,13 +101,21 @@
                         <h1 id="projectBrowserTitle">Hardware Setup Manager</h1>
                         <p class="project-browser-subtitle">Open, create, import, export, and manage shared setup projects.</p>
                     </div>
-                    <button class="action-button primary" id="newProjectBrowserButton" type="button">
-                        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 5v14"></path>
-                            <path d="M5 12h14"></path>
-                        </svg>
-                        <span>New Project</span>
-                    </button>
+                    <div class="project-browser-actions">
+                        <button class="action-button" id="newFolderButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+                            </svg>
+                            <span>New Folder</span>
+                        </button>
+                        <button class="action-button primary" id="newProjectBrowserButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 5v14"></path>
+                                <path d="M5 12h14"></path>
+                            </svg>
+                            <span>New Project</span>
+                        </button>
+                    </div>
                 </div>
 
                 <label class="search-field project-search-field" for="projectSearch">

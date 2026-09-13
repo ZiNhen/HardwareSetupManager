@@ -13,6 +13,7 @@ The original local-only version remains on the local/main branch history. This o
 ## Features
 
 - Multi-project Project Browser
+- Folder grouping for sub-projects
 - Shared Checkpoint and Container hardware maps
 - 22 x 5 setup board with fixed hardware zones
 - Squib, AOD, Sensor, Physical Switch, Mechanical Switch
@@ -130,6 +131,10 @@ Tailscale and Cloudflare Tunnel are deployment options, not source-code dependen
 ## API
 
 - `GET /api/health`
+- `GET /api/folders`
+- `POST /api/folders`
+- `PATCH /api/folders/:folderId`
+- `DELETE /api/folders/:folderId`
 - `GET /api/projects`
 - `POST /api/projects`
 - `GET /api/projects/:projectId`

@@ -25,8 +25,16 @@ function openDatabase() {
         PRAGMA journal_mode = WAL;
         PRAGMA busy_timeout = 5000;
 
+        CREATE TABLE IF NOT EXISTS folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_id INTEGER,
             name TEXT NOT NULL DEFAULT 'Untitled Project',
             harness TEXT NOT NULL DEFAULT '',
             ecu_name TEXT NOT NULL DEFAULT '',
@@ -40,7 +48,8 @@ function openDatabase() {
             container_can2 INTEGER NOT NULL DEFAULT 0,
             revision INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS positions (
@@ -58,7 +67,17 @@ function openDatabase() {
         CREATE INDEX IF NOT EXISTS idx_positions_project_id ON positions(project_id);
         CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
     `);
+    migrateDatabase(db);
+    db.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
     return db;
+}
+
+function migrateDatabase(database) {
+    const columns = database.prepare("PRAGMA table_info(projects)").all().map((column) => column.name);
+    if (!columns.includes("folder_id")) {
+        database.exec("ALTER TABLE projects ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;");
+        database.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
+    }
 }
 
 function nowSql() {
@@ -99,6 +118,35 @@ function normalizeProject(project = {}) {
         calibrationId: cleanString(project.calibrationId),
         notes: cleanString(project.notes)
     };
+}
+
+function pickString(source, key, fallback) {
+    return Object.prototype.hasOwnProperty.call(source, key) ? cleanString(source[key]) : fallback;
+}
+
+function normalizeProjectPatch(project = {}, existing) {
+    const source = project && typeof project === "object" && !Array.isArray(project) ? project : {};
+    return {
+        name: pickString(source, "name", existing.name) || "Untitled Project",
+        harness: pickString(source, "harness", existing.harness),
+        ecuName: pickString(source, "ecuName", existing.ecu_name),
+        partNumber: pickString(source, "partNumber", existing.part_number),
+        calibrationId: pickString(source, "calibrationId", existing.calibration_id),
+        notes: pickString(source, "notes", existing.notes)
+    };
+}
+
+function normalizeFolderId(value) {
+    if (value === null || value === "" || value === undefined) {
+        return null;
+    }
+    const id = Number(value);
+    if (!Number.isInteger(id) || id < 1) {
+        const error = new Error("Invalid folder ID");
+        error.status = 400;
+        throw error;
+    }
+    return id;
 }
 
 function normalizeBoardOptions(boardOptions = {}) {
@@ -189,6 +237,7 @@ function requireProject(projectId) {
 function toProjectSummary(row) {
     return {
         id: row.id,
+        folderId: row.folder_id,
         name: row.name,
         harness: row.harness,
         ecuName: row.ecu_name,
@@ -205,6 +254,7 @@ function rowToState(row, positionRows = []) {
     const state = {
         version: 1,
         id: row.id,
+        folderId: row.folder_id,
         revision: row.revision,
         updatedAt: row.updated_at,
         project: {
@@ -259,6 +309,86 @@ function listProjects() {
     return rows.map(toProjectSummary);
 }
 
+function listFolders() {
+    return openDatabase()
+        .prepare("SELECT id, name, created_at, updated_at FROM folders ORDER BY name COLLATE NOCASE ASC")
+        .all()
+        .map((folder) => ({
+            id: folder.id,
+            name: folder.name,
+            createdAt: folder.created_at,
+            updatedAt: folder.updated_at
+        }));
+}
+
+function createFolder(payload = {}) {
+    const name = cleanString(payload.name);
+    if (!name) {
+        const error = new Error("Folder name is required");
+        error.status = 400;
+        throw error;
+    }
+
+    const timestamp = nowSql();
+    const result = openDatabase()
+        .prepare("INSERT INTO folders (name, created_at, updated_at) VALUES (?, ?, ?)")
+        .run(name, timestamp, timestamp);
+    return {
+        id: Number(result.lastInsertRowid),
+        name,
+        createdAt: timestamp,
+        updatedAt: timestamp
+    };
+}
+
+function updateFolder(folderId, payload = {}) {
+    const id = assertProjectId(folderId);
+    const existing = openDatabase().prepare("SELECT * FROM folders WHERE id = ?").get(id);
+    if (!existing) {
+        const error = new Error("Folder not found");
+        error.status = 404;
+        throw error;
+    }
+
+    const name = cleanString(payload.name) || existing.name;
+    const timestamp = nowSql();
+    openDatabase()
+        .prepare("UPDATE folders SET name = ?, updated_at = ? WHERE id = ?")
+        .run(name, timestamp, id);
+
+    return {
+        id,
+        name,
+        createdAt: existing.created_at,
+        updatedAt: timestamp
+    };
+}
+
+function deleteFolder(folderId) {
+    const id = assertProjectId(folderId);
+    const result = openDatabase().prepare("DELETE FROM folders WHERE id = ?").run(id);
+    if (!result.changes) {
+        const error = new Error("Folder not found");
+        error.status = 404;
+        throw error;
+    }
+}
+
+function requireFolder(folderId) {
+    const id = normalizeFolderId(folderId);
+    if (id === null) {
+        return null;
+    }
+
+    const folder = openDatabase().prepare("SELECT * FROM folders WHERE id = ?").get(id);
+    if (!folder) {
+        const error = new Error("Folder not found");
+        error.status = 404;
+        throw error;
+    }
+    return id;
+}
+
 function getProject(projectId) {
     const row = requireProject(projectId);
     const positions = openDatabase()
@@ -275,17 +405,19 @@ function touchProject(projectId) {
 
 function createProject(payload = {}) {
     const project = normalizeProject(payload.project || payload);
+    const folderId = requireFolder(payload.folderId);
     const boardOptions = normalizeBoardOptions(payload.boardOptions);
     const checkpointCan = normalizeCanChannels(payload.setups && payload.setups.checkpoint && payload.setups.checkpoint.canChannels);
     const containerCan = normalizeCanChannels(payload.setups && payload.setups.container && payload.setups.container.canChannels);
     const projectId = runTransaction((database) => {
         const result = database.prepare(`
             INSERT INTO projects (
-                name, harness, ecu_name, part_number, calibration_id, notes,
+                folder_id, name, harness, ecu_name, part_number, calibration_id, notes,
                 power_linked, checkpoint_can1, checkpoint_can2, container_can1, container_can2,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
+            folderId,
             project.name,
             project.harness,
             project.ecuName,
@@ -330,19 +462,29 @@ function createProject(payload = {}) {
 
 function updateProject(projectId, payload = {}) {
     const id = assertProjectId(projectId);
-    requireProject(id);
-    const project = normalizeProject(payload.project || {});
-    const boardOptions = normalizeBoardOptions(payload.boardOptions);
-    const checkpointCan = normalizeCanChannels(payload.setups && payload.setups.checkpoint && payload.setups.checkpoint.canChannels);
-    const containerCan = normalizeCanChannels(payload.setups && payload.setups.container && payload.setups.container.canChannels);
+    const existing = requireProject(id);
+    const project = normalizeProjectPatch(payload.project || {}, existing);
+    const boardOptions = payload.boardOptions
+        ? normalizeBoardOptions(payload.boardOptions)
+        : { powerLinked: intToBool(existing.power_linked) };
+    const checkpointCan = payload.setups && payload.setups.checkpoint
+        ? normalizeCanChannels(payload.setups.checkpoint.canChannels)
+        : { can1: intToBool(existing.checkpoint_can1), can2: intToBool(existing.checkpoint_can2) };
+    const containerCan = payload.setups && payload.setups.container
+        ? normalizeCanChannels(payload.setups.container.canChannels)
+        : { can1: intToBool(existing.container_can1), can2: intToBool(existing.container_can2) };
+    const folderId = Object.prototype.hasOwnProperty.call(payload, "folderId")
+        ? requireFolder(payload.folderId)
+        : existing.folder_id;
 
     openDatabase().prepare(`
         UPDATE projects
-        SET name = ?, harness = ?, ecu_name = ?, part_number = ?, calibration_id = ?, notes = ?,
+        SET folder_id = ?, name = ?, harness = ?, ecu_name = ?, part_number = ?, calibration_id = ?, notes = ?,
             power_linked = ?, checkpoint_can1 = ?, checkpoint_can2 = ?, container_can1 = ?, container_can2 = ?,
             revision = revision + 1, updated_at = ?
         WHERE id = ?
     `).run(
+        folderId,
         project.name,
         project.harness,
         project.ecuName,
@@ -507,6 +649,10 @@ function rowToPosition(row) {
 module.exports = {
     DB_PATH,
     openDatabase,
+    listFolders,
+    createFolder,
+    updateFolder,
+    deleteFolder,
     listProjects,
     createProject,
     getProject,

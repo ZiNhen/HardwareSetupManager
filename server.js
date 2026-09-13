@@ -31,6 +31,26 @@ app.get("/api/health", (request, response) => {
     response.json({ status: "ok", database: "ok" });
 });
 
+app.get("/api/folders", asyncRoute((request, response) => {
+    response.json({ folders: db.listFolders() });
+}));
+
+app.post("/api/folders", asyncRoute((request, response) => {
+    const folder = db.createFolder(request.body || {});
+    console.log(`[INFO] Folder created: ${folder.id} ${folder.name}`);
+    response.status(201).json({ folder });
+}));
+
+app.patch("/api/folders/:folderId", asyncRoute((request, response) => {
+    response.json({ folder: db.updateFolder(request.params.folderId, request.body || {}) });
+}));
+
+app.delete("/api/folders/:folderId", asyncRoute((request, response) => {
+    db.deleteFolder(request.params.folderId);
+    console.log(`[INFO] Folder deleted: ${request.params.folderId}`);
+    response.status(204).end();
+}));
+
 app.get("/api/projects", asyncRoute((request, response) => {
     response.json({ projects: db.listProjects() });
 }));
