@@ -313,8 +313,12 @@ function bindEvents() {
         });
     });
 
-    dom.hardwareSearch.addEventListener("input", handleSearch);
-    dom.clearSearchButton.addEventListener("click", clearSearch);
+    if (dom.hardwareSearch) {
+        dom.hardwareSearch.addEventListener("input", handleSearch);
+    }
+    if (dom.clearSearchButton) {
+        dom.clearSearchButton.addEventListener("click", clearSearch);
+    }
     dom.copySetupButton.addEventListener("click", copyCurrentSetup);
     dom.pasteSetupButton.addEventListener("click", pasteCopiedSetup);
     dom.copySelectionButton.addEventListener("click", copyBoardSelection);
@@ -607,7 +611,9 @@ function setEditorVisible(visible) {
     dom.copySetupButton.hidden = !visible;
     dom.pasteSetupButton.hidden = !visible;
     dom.exportButton.hidden = !visible;
-    dom.hardwareSearch.closest(".search-field").hidden = !visible;
+    if (dom.hardwareSearch) {
+        dom.hardwareSearch.closest(".search-field").hidden = !visible;
+    }
     dom.setupTabs[0].parentElement.hidden = !visible;
     document.body.classList.toggle("is-project-browser", !visible);
 
@@ -627,7 +633,9 @@ async function showProjectBrowser(options = {}) {
     currentProjectId = null;
     appState = createInitialState();
     editorContext = null;
-    boardClipboard = null;
+    if (!boardClipboard || boardClipboard.kind !== "setup") {
+        boardClipboard = null;
+    }
     clearSelectionState();
     setEditorVisible(false);
     setSaveIndicator("Syncing...", "saving");
@@ -726,7 +734,9 @@ async function openProject(projectId, options = {}) {
         undoStack = [];
         redoStack = [];
         editorContext = null;
-        boardClipboard = null;
+        if (!boardClipboard || boardClipboard.kind !== "setup") {
+            boardClipboard = null;
+        }
         clearSelectionState();
         setEditorVisible(true);
         renderApp();
@@ -932,6 +942,9 @@ function isEditMode() {
 }
 
 function renderSearch() {
+    if (!dom.hardwareSearch || !dom.clearSearchButton) {
+        return;
+    }
     dom.hardwareSearch.value = appState.searchQuery;
     dom.clearSearchButton.hidden = !appState.searchQuery;
 }
@@ -2178,6 +2191,9 @@ function switchInteractionMode(mode) {
 }
 
 function handleSearch() {
+    if (!dom.hardwareSearch) {
+        return;
+    }
     appState.searchQuery = dom.hardwareSearch.value;
     renderSearch();
     renderGrid();
@@ -2187,7 +2203,9 @@ function clearSearch() {
     appState.searchQuery = "";
     renderSearch();
     renderGrid();
-    dom.hardwareSearch.focus();
+    if (dom.hardwareSearch) {
+        dom.hardwareSearch.focus();
+    }
 }
 
 function cutBoardSelection() {

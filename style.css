@@ -159,7 +159,7 @@ textarea:focus-visible,
     display: inline-flex;
     width: 100%;
     max-width: 100%;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     padding: 0;
     background: transparent;
@@ -170,18 +170,23 @@ textarea:focus-visible,
 
 .project-name-button span {
     min-width: 0;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
     overflow: hidden;
     font-size: clamp(1.75rem, 2.6vw, 2.35rem);
     font-weight: 760;
     line-height: 1.05;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-word;
 }
 
 .project-name-button .icon {
     width: 22px;
     height: 22px;
     flex: 0 0 auto;
+    margin-top: 0.35rem;
     color: var(--text-muted);
     transition: color var(--transition), transform var(--transition);
 }
@@ -247,12 +252,12 @@ textarea:focus-visible,
 
 .header-actions {
     min-width: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(104px, max-content));
     flex: 1 1 520px;
     align-items: center;
     justify-content: flex-end;
     gap: 9px;
-    flex-wrap: wrap;
 }
 
 .search-field {
@@ -1728,14 +1733,8 @@ textarea:focus-visible,
     }
 
     .header-actions {
-        display: grid;
-        grid-template-columns: minmax(220px, 1fr) repeat(6, minmax(0, auto));
+        grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
         width: 100%;
-    }
-
-    .header-actions .search-field {
-        width: 100%;
-        min-width: 0;
     }
 
     .save-indicator {
@@ -1747,10 +1746,6 @@ textarea:focus-visible,
 @media (max-width: 900px) {
     .header-actions {
         grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .header-actions .search-field {
-        grid-column: 1 / -1;
     }
 
     .action-button {
@@ -1839,10 +1834,6 @@ textarea:focus-visible,
 
     .header-actions {
         grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .header-actions .search-field {
-        grid-column: 1 / -1;
     }
 
     .map-tools {

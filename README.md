@@ -43,7 +43,7 @@ On Windows, you can also double-click:
 start-server.bat
 ```
 
-The batch file installs dependencies once if `node_modules` is missing, then starts the server.
+This is the fewest-step path after cloning: the batch file installs dependencies once if `node_modules` is missing, then starts the server.
 
 ## LAN Deployment
 
