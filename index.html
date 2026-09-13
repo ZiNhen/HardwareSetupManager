@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware Setup Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-shell">
+        <header class="app-header" aria-label="Application header">
+            <div class="header-main">
+                <div class="title-area">
+                    <p class="app-kicker">Hardware Setup</p>
+                    <div class="project-name-row" id="projectNameRegion">
+                        <button class="project-name-button" id="projectNameButton" type="button" aria-label="Edit project name">
+                            <span id="projectNameText">Untitled Project</span>
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 20h9"></path>
+                                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="header-controls">
+                    <div class="segmented-control" role="tablist" aria-label="Hardware setup">
+                        <button class="segment-button is-active" type="button" role="tab" aria-selected="true" data-setup-tab="checkpoint">Checkpoint</button>
+                        <button class="segment-button" type="button" role="tab" aria-selected="false" data-setup-tab="container">Container</button>
+                    </div>
+
+                    <div class="header-actions">
+                        <label class="search-field" for="hardwareSearch">
+                            <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7"></circle>
+                                <path d="m16.5 16.5 4 4"></path>
+                            </svg>
+                            <input id="hardwareSearch" type="search" autocomplete="off" placeholder="Search hardware...">
+                            <button class="search-clear" id="clearSearchButton" type="button" aria-label="Clear search" hidden>
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M18 6 6 18"></path>
+                                    <path d="m6 6 12 12"></path>
+                                </svg>
+                            </button>
+                        </label>
+
+                        <button class="action-button" id="copySetupButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"></path>
+                            </svg>
+                            <span>Copy Setup</span>
+                        </button>
+                        <button class="action-button" id="pasteSetupButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M8 4h8"></path>
+                                <path d="M9 2h6a2 2 0 0 1 2 2v2H7V4a2 2 0 0 1 2-2Z"></path>
+                                <path d="M8 10H6a2 2 0 0 0-2 2v8h16v-8a2 2 0 0 0-2-2h-2"></path>
+                            </svg>
+                            <span>Paste Setup</span>
+                        </button>
+                        <button class="action-button" id="importButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 3v12"></path>
+                                <path d="m7 10 5 5 5-5"></path>
+                                <path d="M5 21h14"></path>
+                            </svg>
+                            <span>Import</span>
+                        </button>
+                        <button class="action-button" id="exportButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 15V3"></path>
+                                <path d="m7 8 5-5 5 5"></path>
+                                <path d="M5 21h14"></path>
+                            </svg>
+                            <span>Export</span>
+                        </button>
+                        <button class="action-button" id="helpButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <circle cx="12" cy="12" r="9"></circle>
+                                <path d="M9.5 9a2.8 2.8 0 0 1 5.1 1.6c0 2-2.6 2.2-2.6 4"></path>
+                                <path d="M12 18h.01"></path>
+                            </svg>
+                            <span>Help</span>
+                        </button>
+                        <button class="action-button primary" id="newProjectButton" type="button">
+                            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 5v14"></path>
+                                <path d="M5 12h14"></path>
+                            </svg>
+                            <span>New</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="save-indicator" id="saveIndicator" role="status" aria-live="polite">
+                <span class="save-dot" aria-hidden="true"></span>
+                <span id="saveIndicatorText">Saved locally</span>
+            </div>
+        </header>
+
+        <main class="workspace" aria-label="Hardware setup workspace">
+            <section class="panel project-panel" aria-labelledby="projectInfoTitle">
+                <div class="panel-header">
+                    <h2 id="projectInfoTitle">Project Information</h2>
+                </div>
+                <form class="info-form" id="projectInfoForm">
+                    <label class="field">
+                        <span>ECU Name</span>
+                        <input type="text" data-project-field="ecuName" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Part Number</span>
+                        <input type="text" data-project-field="partNumber" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Harness</span>
+                        <input type="text" data-project-field="harness" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Calibration ID</span>
+                        <input type="text" data-project-field="calibrationId" autocomplete="off">
+                    </label>
+                    <label class="field field-wide">
+                        <span>Notes</span>
+                        <textarea data-project-field="notes" rows="7"></textarea>
+                    </label>
+                </form>
+            </section>
+
+            <section class="panel map-panel" aria-labelledby="hardwareMapTitle">
+                <div class="panel-header map-panel-header">
+                    <div>
+                        <h2 id="hardwareMapTitle">Hardware Map</h2>
+                        <p class="map-hint" id="mapHint">View mode: click a position to view details</p>
+                    </div>
+                    <div class="map-tools">
+                        <div class="interaction-mode" aria-label="Interaction mode">
+                            <span class="mode-label">Mode</span>
+                            <div class="mini-segmented-control" role="group" aria-label="Select interaction mode">
+                                <button class="mini-segment-button is-active" type="button" data-interaction-mode="view">View</button>
+                                <button class="mini-segment-button" type="button" data-interaction-mode="edit">Edit</button>
+                            </div>
+                        </div>
+                        <div class="board-clipboard-tools" aria-label="Board selection tools">
+                            <button class="mini-action-button" id="copySelectionButton" type="button">Copy Selection</button>
+                            <button class="mini-action-button" id="pasteSelectionButton" type="button">Paste</button>
+                        </div>
+                        <div class="legend" aria-label="Hardware type legend">
+                            <span class="legend-item"><span class="legend-dot type-squib"></span>Squib</span>
+                            <span class="legend-item"><span class="legend-dot type-aod"></span>AOD</span>
+                            <span class="legend-item"><span class="legend-dot type-sensor"></span>Sensor</span>
+                            <span class="legend-item"><span class="legend-dot type-physical-switch"></span>Physical Switch</span>
+                            <span class="legend-item"><span class="legend-dot type-mechanical-switch"></span>Mechanical Switch</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="search-status" id="searchStatus" aria-live="polite"></div>
+                <div class="map-scroll" id="mapScroll" tabindex="0" aria-label="Scrollable hardware map">
+                    <div class="hardware-grid" id="hardwareGrid" aria-label="22 row by 5 column hardware map"></div>
+                </div>
+            </section>
+
+            <aside class="panel details-panel" aria-labelledby="positionDetailsTitle">
+                <div class="panel-header">
+                    <h2 id="positionDetailsTitle">Position Details</h2>
+                </div>
+                <div class="setup-summary" id="setupSummary" aria-live="polite"></div>
+                <div class="details-content" id="positionDetailsContent"></div>
+            </aside>
+        </main>
+    </div>
+
+    <input id="importFileInput" type="file" accept=".json,application/json" hidden>
+
+    <div class="modal-overlay" id="modalOverlay" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <div id="modalContent"></div>
+        </div>
+    </div>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite" aria-label="Notifications"></div>
+    <div class="hardware-tooltip" id="hardwareTooltip" role="tooltip" hidden></div>
+    <div class="context-menu" id="positionContextMenu" role="menu" hidden></div>
+
+    <script src="script.js"></script>
+</body>
+</html>
