@@ -220,7 +220,7 @@ const storage = {
 let appState = createInitialState();
 let dom = {};
 let currentProjectId = null;
-let projectBrowserState = { projects: [], folders: [], query: "", currentFolderId: null, selectedItem: null };
+let projectBrowserState = { projects: [], folders: [], query: "", currentFolderId: null, selectedItem: null, clipboard: null };
 let positionElements = new Map();
 let utilityElements = new Map();
 let editorContext = null;
@@ -396,6 +396,7 @@ function bindEvents() {
         projectBrowserState.query = dom.projectSearch.value;
         renderProjectBrowserList();
     });
+    dom.projectList.addEventListener("contextmenu", openProjectBrowserContextMenu);
 
     document.addEventListener("keydown", (event) => {
         if (handleProjectBrowserKeyboardShortcut(event)) {
@@ -769,6 +770,7 @@ function renderProjectBrowserPath(currentFolder) {
     root.className = "project-path-button";
     root.textContent = "All Projects";
     root.addEventListener("click", () => openBrowserFolder(null));
+    root.addEventListener("contextmenu", (event) => openProjectBrowserContextMenu(event, true));
     root.addEventListener("dragover", (event) => event.preventDefault());
     root.addEventListener("drop", async (event) => {
         event.preventDefault();
@@ -840,13 +842,7 @@ function createFolderCard(folder) {
                 <span>Updated ${escapeHtml(formatRelativeTime(folder.updatedAt))}</span>
             </div>
         </div>
-        <div class="project-card-actions">
-            ${renderInlineActionMarkup("Open")}
-            ${renderInlineActionMarkup("Rename")}
-        </div>
     `;
-    bindInlineAction(card, "Open", () => openBrowserFolder(folder.id));
-    bindInlineAction(card, "Rename", () => openRenameFolderModal(folder));
     return card;
 }
 
@@ -876,13 +872,7 @@ function createProjectCard(project) {
                 <span>Updated ${escapeHtml(formatRelativeTime(project.updatedAt))}</span>
             </div>
         </div>
-        <div class="project-card-actions">
-            ${renderInlineActionMarkup("Open")}
-            ${renderInlineActionMarkup("Export")}
-        </div>
     `;
-    bindInlineAction(card, "Open", () => openProject(project.id));
-    bindInlineAction(card, "Export", () => exportProjectById(project.id));
     return card;
 }
 
@@ -905,21 +895,6 @@ function createBrowserItemCard(kind, id) {
         }
     });
     return card;
-}
-
-function renderInlineActionMarkup(label) {
-    return `<button class="secondary-button" type="button" data-inline-action="${escapeAttribute(label)}">${escapeHtml(label)}</button>`;
-}
-
-function bindInlineAction(card, label, handler) {
-    const button = card.querySelector(`[data-inline-action="${CSS.escape(label)}"]`);
-    if (!button) {
-        return;
-    }
-    button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        handler();
-    });
 }
 
 function selectProjectBrowserItem(kind, id) {
@@ -989,12 +964,27 @@ function getSelectedBrowserItem() {
 }
 
 function handleProjectBrowserKeyboardShortcut(event) {
-    if (dom.projectBrowser.hidden || !projectBrowserState.selectedItem || !["Enter", "F2", "Delete"].includes(event.key)) {
+    if (dom.projectBrowser.hidden) {
+        return false;
+    }
+    if (isEditableShortcutTarget(event.target)) {
         return false;
     }
 
     const selected = getSelectedBrowserItem();
-    if (!selected) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        pasteBrowserItem(projectBrowserState.currentFolderId || null);
+        return true;
+    }
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && selected) {
+        event.preventDefault();
+        copyBrowserItem(selected.kind, selected.value);
+        return true;
+    }
+
+    if (!selected || !["Enter", "F2", "Delete"].includes(event.key)) {
         return false;
     }
 
@@ -1025,14 +1015,34 @@ function handleProjectBrowserKeyboardShortcut(event) {
     return true;
 }
 
+function isEditableShortcutTarget(target) {
+    if (!target || target === document.body) {
+        return false;
+    }
+    return target.closest("input, textarea, select, [contenteditable='true']");
+}
+
 function openFolderContextMenu(event, folder) {
     event.preventDefault();
     event.stopPropagation();
     selectProjectBrowserItem("folder", folder.id);
-    renderPositionContextMenu([
+    const actions = [
         {
             label: "Open",
             handler: () => openBrowserFolder(folder.id)
+        },
+        {
+            label: "Copy",
+            handler: () => copyBrowserItem("folder", folder)
+        },
+        {
+            label: "Paste",
+            handler: () => pasteBrowserItem(folder.id),
+            disabled: !projectBrowserState.clipboard
+        },
+        {
+            label: "Duplicate",
+            handler: () => duplicateFolder(folder)
         },
         {
             label: "Rename",
@@ -1043,7 +1053,8 @@ function openFolderContextMenu(event, folder) {
             className: "is-danger",
             handler: () => requestDeleteFolder(folder)
         }
-    ]);
+    ].filter((action) => !action.disabled);
+    renderPositionContextMenu(actions);
     placePositionContextMenu(event.clientX, event.clientY);
 }
 
@@ -1061,10 +1072,23 @@ function openProjectContextMenu(event, project) {
             handler: () => moveProjectToFolder(project.id, folder.id)
         }))
     ];
-    renderPositionContextMenu([
+    const actions = [
         {
             label: "Open",
             handler: () => openProject(project.id)
+        },
+        {
+            label: "Copy",
+            handler: () => copyBrowserItem("project", project)
+        },
+        {
+            label: "Paste",
+            handler: () => pasteBrowserItem(projectBrowserState.currentFolderId || null),
+            disabled: !projectBrowserState.clipboard
+        },
+        {
+            label: "Duplicate",
+            handler: () => duplicateProject(project, project.folderId || projectBrowserState.currentFolderId || null)
         },
         {
             label: "Rename",
@@ -1083,8 +1107,128 @@ function openProjectContextMenu(event, project) {
             className: "is-danger",
             handler: () => requestDeleteProject(project)
         }
-    ]);
+    ].filter((action) => !action.disabled);
+    renderPositionContextMenu(actions);
     placePositionContextMenu(event.clientX, event.clientY);
+}
+
+function openProjectBrowserContextMenu(event, force = false) {
+    if (!force && (event.target.closest(".project-browser-item") || event.target.closest(".project-browser-path"))) {
+        return;
+    }
+
+    event.preventDefault();
+    projectBrowserState.selectedItem = null;
+    renderProjectBrowserSelection();
+    const targetFolderId = projectBrowserState.currentFolderId || null;
+    const actions = [
+        {
+            label: "New Folder",
+            handler: openNewFolderModal
+        },
+        {
+            label: "New Project",
+            handler: createNewServerProject
+        },
+        {
+            label: "Paste",
+            handler: () => pasteBrowserItem(targetFolderId),
+            disabled: !projectBrowserState.clipboard
+        }
+    ].filter((action) => !action.disabled);
+    renderPositionContextMenu(actions);
+    placePositionContextMenu(event.clientX, event.clientY);
+}
+
+function copyBrowserItem(kind, item) {
+    projectBrowserState.clipboard = {
+        kind,
+        id: String(item.id),
+        name: item.name || DEFAULT_PROJECT_NAME
+    };
+    showToast(kind === "folder" ? "Folder copied" : "Project copied");
+}
+
+async function pasteBrowserItem(targetFolderId) {
+    if (!projectBrowserState.clipboard) {
+        showToast("Nothing to paste");
+        return;
+    }
+
+    if (projectBrowserState.clipboard.kind === "folder") {
+        const folder = projectBrowserState.folders.find((item) => String(item.id) === projectBrowserState.clipboard.id);
+        if (!folder) {
+            showToast("Folder not found");
+            return;
+        }
+        await duplicateFolder(folder);
+        return;
+    }
+
+    const project = projectBrowserState.projects.find((item) => String(item.id) === projectBrowserState.clipboard.id);
+    if (!project) {
+        showToast("Project not found");
+        return;
+    }
+    await duplicateProject(project, targetFolderId);
+}
+
+async function duplicateProject(project, targetFolderId) {
+    setSaveIndicator("Saving...", "saving");
+    try {
+        const data = await storage.loadProject(project.id);
+        const payload = createExportData(data.project);
+        payload.project.name = createCopyName(payload.project.name, projectBrowserState.projects.map((item) => item.name));
+        payload.folderId = targetFolderId || null;
+        const created = await storage.createProject(payload);
+        projectBrowserState.projects.unshift(projectStateToBrowserSummary(created.project));
+        renderProjectBrowserList();
+        setSaveIndicator("Online", "saved");
+        showToast("Project duplicated");
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+        showToast("Failed to duplicate project");
+    }
+}
+
+async function duplicateFolder(folder) {
+    setSaveIndicator("Saving...", "saving");
+    try {
+        const folderData = await storage.createFolder({
+            name: createCopyName(folder.name, projectBrowserState.folders.map((item) => item.name))
+        });
+        const sourceProjects = projectBrowserState.projects.filter((project) => String(project.folderId || "") === String(folder.id));
+        for (const project of sourceProjects) {
+            const data = await storage.loadProject(project.id);
+            const payload = createExportData(data.project);
+            payload.project.name = createCopyName(payload.project.name, projectBrowserState.projects.map((item) => item.name));
+            payload.folderId = folderData.folder.id;
+            const created = await storage.createProject(payload);
+            projectBrowserState.projects.unshift(projectStateToBrowserSummary(created.project));
+        }
+        projectBrowserState.folders.push(folderData.folder);
+        projectBrowserState.folders.sort((a, b) => a.name.localeCompare(b.name));
+        renderProjectBrowserList();
+        setSaveIndicator("Online", "saved");
+        showToast("Folder duplicated");
+    } catch (error) {
+        setSaveIndicator("Offline", "error");
+        showToast("Failed to duplicate folder");
+    }
+}
+
+function createCopyName(baseName, existingNames) {
+    const base = normalizeString(baseName) || DEFAULT_PROJECT_NAME;
+    const names = new Set((existingNames || []).map((name) => normalizeString(name).toLowerCase()));
+    let candidate = `${base} Copy`;
+    let index = 2;
+
+    while (names.has(candidate.toLowerCase())) {
+        candidate = `${base} Copy ${index}`;
+        index += 1;
+    }
+
+    return candidate;
 }
 
 function openNewFolderModal() {
@@ -4150,7 +4294,7 @@ function openUsageGuide() {
             <div class="guide-list">
                 <section class="guide-section">
                     <h3>Project Browser</h3>
-                    <p>Folders and projects behave like a lightweight file explorer. Use Back to return to All Projects, click once to select, double-click or press Enter to open, press F2 to rename, press Delete to remove, right-click for actions, and drag a project onto a folder to move it. The browser refreshes automatically while it is open.</p>
+                    <p>Folders and projects behave like a lightweight file explorer. Use Back to return to All Projects, click once to select, double-click or press Enter to open, Ctrl+C copies, Ctrl+V pastes, F2 renames, Delete removes, and right-click opens actions such as Copy, Paste, Duplicate, Rename, and Move To. The browser refreshes automatically while it is open.</p>
                 </section>
                 <section class="guide-section">
                     <h3>View mode</h3>
