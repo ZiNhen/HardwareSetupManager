@@ -4015,7 +4015,15 @@ async function handlePositionSaveError(error) {
     }
 
     setSaveIndicator("Failed to save", "error");
-    showToast(error.status === 0 ? "Server unavailable" : "Failed to save");
+    showToast(getSaveErrorMessage(error));
+}
+
+function getSaveErrorMessage(error) {
+    if (error && error.status === 0) {
+        return "Server unavailable";
+    }
+
+    return error && error.message ? error.message : "Failed to save";
 }
 
 async function reloadCurrentProject() {
@@ -4437,7 +4445,7 @@ async function applySetupPaste() {
         showToast("Setup pasted");
     } catch (error) {
         setSaveIndicator("Failed to save", "error");
-        showToast("Failed to save");
+        showToast(getSaveErrorMessage(error));
     }
 }
 
@@ -4707,7 +4715,7 @@ async function flushProjectSave() {
         setSaveIndicator("Saved", "saved");
     } catch (error) {
         setSaveIndicator("Failed to save", "error");
-        showToast("Failed to save");
+        showToast(getSaveErrorMessage(error));
     }
 }
 
