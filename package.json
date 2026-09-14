@@ -2,18 +2,13 @@
   "name": "hardware-setup-manager",
   "version": "2.0.0-online",
   "private": true,
-  "description": "Local LAN multi-user Hardware Setup Manager with Express and SQLite.",
+  "description": "Local LAN multi-user Hardware Setup Manager with built-in Node.js HTTP and SQLite.",
   "main": "server.js",
   "scripts": {
     "start": "node --no-warnings server.js",
     "backup": "node --no-warnings scripts/backup.js"
   },
-  "dependencies": {
-    "express": "^5.2.1"
-  },
-  "overrides": {
-    "qs": "^6.16.0"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=24"
   }

@@ -1,144 +1,290 @@
 "use strict";
 
-const express = require("express");
+const fs = require("node:fs");
+const http = require("node:http");
 const path = require("node:path");
 const db = require("./db");
 
 const PORT = Number(process.env.PORT) || 3000;
-const app = express();
+const BODY_LIMIT_BYTES = 512 * 1024;
 
 db.openDatabase();
 
-app.disable("x-powered-by");
-app.use(express.json({ limit: "512kb" }));
-
-app.use((request, response, next) => {
-    if (/^\/(\.git|data|backups|node_modules|scripts)(\/|$)/i.test(request.path)
-        || /^\/(server\.js|db\.js|package(?:-lock)?\.json|README\.md|start-server\.bat)$/i.test(request.path)) {
-        response.status(404).send("Not found");
-        return;
-    }
-    next();
-});
-
-function asyncRoute(handler) {
-    return (request, response, next) => {
-        Promise.resolve(handler(request, response, next)).catch(next);
-    };
+function sendJson(response, data, status = 200) {
+    const body = JSON.stringify(data);
+    response.writeHead(status, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body),
+        "X-Content-Type-Options": "nosniff"
+    });
+    response.end(body);
 }
 
-app.get("/api/health", (request, response) => {
-    response.json({ status: "ok", database: "ok" });
-});
+function sendText(response, text, status = 200) {
+    response.writeHead(status, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Length": Buffer.byteLength(text),
+        "X-Content-Type-Options": "nosniff"
+    });
+    response.end(text);
+}
 
-app.get("/api/folders", asyncRoute((request, response) => {
-    response.json({ folders: db.listFolders() });
-}));
+function sendNoContent(response) {
+    response.writeHead(204, {
+        "X-Content-Type-Options": "nosniff"
+    });
+    response.end();
+}
 
-app.post("/api/folders", asyncRoute((request, response) => {
-    const folder = db.createFolder(request.body || {});
-    console.log(`[INFO] Folder created: ${folder.id} ${folder.name}`);
-    response.status(201).json({ folder });
-}));
-
-app.patch("/api/folders/:folderId", asyncRoute((request, response) => {
-    response.json({ folder: db.updateFolder(request.params.folderId, request.body || {}) });
-}));
-
-app.delete("/api/folders/:folderId", asyncRoute((request, response) => {
-    db.deleteFolder(request.params.folderId);
-    console.log(`[INFO] Folder deleted: ${request.params.folderId}`);
-    response.status(204).end();
-}));
-
-app.get("/api/projects", asyncRoute((request, response) => {
-    response.json({ projects: db.listProjects() });
-}));
-
-app.post("/api/projects", asyncRoute((request, response) => {
-    const project = db.createProject(request.body || {});
-    console.log(`[INFO] Project created: ${project.id} ${project.project.name}`);
-    response.status(201).json({ project });
-}));
-
-app.get("/api/projects/:projectId", asyncRoute((request, response) => {
-    response.json({ project: db.getProject(request.params.projectId) });
-}));
-
-app.patch("/api/projects/:projectId", asyncRoute((request, response) => {
-    response.json({ project: db.updateProject(request.params.projectId, request.body || {}) });
-}));
-
-app.delete("/api/projects/:projectId", asyncRoute((request, response) => {
-    db.deleteProject(request.params.projectId);
-    console.log(`[INFO] Project deleted: ${request.params.projectId}`);
-    response.status(204).end();
-}));
-
-app.get("/api/projects/:projectId/updates", asyncRoute((request, response) => {
-    response.json(db.getUpdates(request.params.projectId));
-}));
-
-app.put("/api/projects/:projectId/setups/:setupType", asyncRoute((request, response) => {
-    const setup = db.replaceSetup(request.params.projectId, request.params.setupType, request.body || {});
-    response.json({ setup });
-}));
-
-app.put("/api/projects/:projectId/setups/:setupType/positions/:positionId", asyncRoute((request, response) => {
-    const position = db.upsertPosition(
-        request.params.projectId,
-        request.params.setupType,
-        request.params.positionId,
-        request.body || {}
-    );
-    response.json({ position });
-}));
-
-app.delete("/api/projects/:projectId/setups/:setupType/positions/:positionId", asyncRoute((request, response) => {
-    db.deletePosition(
-        request.params.projectId,
-        request.params.setupType,
-        request.params.positionId,
-        request.body || {}
-    );
-    response.status(204).end();
-}));
-
-const staticFiles = new Map([
-    ["/", "index.html"],
-    ["/index.html", "index.html"],
-    ["/style.css", "style.css"],
-    ["/script.js", "script.js"]
-]);
-
-app.get(["/", "/index.html", "/style.css", "/script.js"], (request, response) => {
-    const file = staticFiles.get(request.path);
-    response.sendFile(path.join(__dirname, file));
-});
-
-app.get(/.*/, (request, response) => {
-    response.sendFile(path.join(__dirname, "index.html"));
-});
-
-app.use((error, request, response, next) => {
+function sendError(response, error) {
     const status = Number(error.status) || 500;
     const code = status === 409 ? "conflict"
         : status === 404 ? "not_found"
             : status === 400 ? "bad_request"
-                : "server_error";
+                : status === 413 ? "payload_too_large"
+                    : "server_error";
 
     if (status >= 500) {
         console.error("[ERROR]", error.message);
     }
 
-    response.status(status).json({
+    sendJson(response, {
         error: code,
         message: status >= 500 ? "Server error" : error.message,
         latest: error.latest || undefined
+    }, status);
+}
+
+function getContentType(filePath) {
+    const extension = path.extname(filePath).toLowerCase();
+    if (extension === ".html") {
+        return "text/html; charset=utf-8";
+    }
+    if (extension === ".css") {
+        return "text/css; charset=utf-8";
+    }
+    if (extension === ".js") {
+        return "text/javascript; charset=utf-8";
+    }
+    return "application/octet-stream";
+}
+
+function isBlockedPath(pathname) {
+    return /^\/(\.git|data|backups|node_modules|nodejs|scripts|logs)(\/|$)/i.test(pathname)
+        || /^\/(server\.js|db\.js|package(?:-lock)?\.json|README\.md|start(?:-background|-server)?\.bat|stop-server\.bat)$/i.test(pathname);
+}
+
+function sendFile(response, fileName) {
+    const filePath = path.join(__dirname, fileName);
+    fs.readFile(filePath, (error, data) => {
+        if (error) {
+            sendText(response, "Not found", 404);
+            return;
+        }
+
+        response.writeHead(200, {
+            "Content-Type": getContentType(filePath),
+            "Content-Length": data.length,
+            "X-Content-Type-Options": "nosniff"
+        });
+        response.end(data);
     });
+}
+
+function readRequestBody(request) {
+    return new Promise((resolve, reject) => {
+        let size = 0;
+        const chunks = [];
+
+        request.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > BODY_LIMIT_BYTES) {
+                const error = new Error("Request body is too large");
+                error.status = 413;
+                reject(error);
+                request.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+
+        request.on("end", () => {
+            if (!chunks.length) {
+                resolve({});
+                return;
+            }
+
+            const text = Buffer.concat(chunks).toString("utf8");
+            try {
+                resolve(text ? JSON.parse(text) : {});
+            } catch (error) {
+                const parseError = new Error("Invalid JSON body");
+                parseError.status = 400;
+                reject(parseError);
+            }
+        });
+
+        request.on("error", reject);
+    });
+}
+
+function matchRoute(pathname, pattern) {
+    const pathParts = pathname.split("/").filter(Boolean);
+    const patternParts = pattern.split("/").filter(Boolean);
+    if (pathParts.length !== patternParts.length) {
+        return null;
+    }
+
+    const params = {};
+    for (let index = 0; index < patternParts.length; index += 1) {
+        const expected = patternParts[index];
+        const actual = pathParts[index];
+        if (expected.startsWith(":")) {
+            params[expected.slice(1)] = decodeURIComponent(actual);
+        } else if (expected !== actual) {
+            return null;
+        }
+    }
+
+    return params;
+}
+
+async function handleApiRequest(request, response, pathname) {
+    const method = request.method || "GET";
+
+    if (method === "GET" && pathname === "/api/health") {
+        sendJson(response, { status: "ok", database: "ok" });
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/folders") {
+        sendJson(response, { folders: db.listFolders() });
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/folders") {
+        const folder = db.createFolder(await readRequestBody(request));
+        console.log(`[INFO] Folder created: ${folder.id} ${folder.name}`);
+        sendJson(response, { folder }, 201);
+        return;
+    }
+
+    let params = matchRoute(pathname, "/api/folders/:folderId");
+    if (params && method === "PATCH") {
+        const folder = db.updateFolder(params.folderId, await readRequestBody(request));
+        sendJson(response, { folder });
+        return;
+    }
+    if (params && method === "DELETE") {
+        db.deleteFolder(params.folderId);
+        console.log(`[INFO] Folder deleted: ${params.folderId}`);
+        sendNoContent(response);
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/projects") {
+        sendJson(response, { projects: db.listProjects() });
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/projects") {
+        const project = db.createProject(await readRequestBody(request));
+        console.log(`[INFO] Project created: ${project.id} ${project.project.name}`);
+        sendJson(response, { project }, 201);
+        return;
+    }
+
+    params = matchRoute(pathname, "/api/projects/:projectId/updates");
+    if (params && method === "GET") {
+        sendJson(response, db.getUpdates(params.projectId));
+        return;
+    }
+
+    params = matchRoute(pathname, "/api/projects/:projectId/setups/:setupType");
+    if (params && method === "PUT") {
+        const setup = db.replaceSetup(params.projectId, params.setupType, await readRequestBody(request));
+        sendJson(response, { setup });
+        return;
+    }
+
+    params = matchRoute(pathname, "/api/projects/:projectId/setups/:setupType/positions/:positionId");
+    if (params && method === "PUT") {
+        const position = db.upsertPosition(
+            params.projectId,
+            params.setupType,
+            params.positionId,
+            await readRequestBody(request)
+        );
+        sendJson(response, { position });
+        return;
+    }
+    if (params && method === "DELETE") {
+        db.deletePosition(
+            params.projectId,
+            params.setupType,
+            params.positionId,
+            await readRequestBody(request)
+        );
+        sendNoContent(response);
+        return;
+    }
+
+    params = matchRoute(pathname, "/api/projects/:projectId");
+    if (params && method === "GET") {
+        sendJson(response, { project: db.getProject(params.projectId) });
+        return;
+    }
+    if (params && method === "PATCH") {
+        const project = db.updateProject(params.projectId, await readRequestBody(request));
+        sendJson(response, { project });
+        return;
+    }
+    if (params && method === "DELETE") {
+        db.deleteProject(params.projectId);
+        console.log(`[INFO] Project deleted: ${params.projectId}`);
+        sendNoContent(response);
+        return;
+    }
+
+    const error = new Error("Not found");
+    error.status = 404;
+    throw error;
+}
+
+function handleStaticRequest(request, response, pathname) {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+        sendText(response, "Method not allowed", 405);
+        return;
+    }
+
+    if (isBlockedPath(pathname)) {
+        sendText(response, "Not found", 404);
+        return;
+    }
+
+    const staticFiles = new Map([
+        ["/", "index.html"],
+        ["/index.html", "index.html"],
+        ["/style.css", "style.css"],
+        ["/script.js", "script.js"]
+    ]);
+
+    sendFile(response, staticFiles.get(pathname) || "index.html");
+}
+
+const server = http.createServer((request, response) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const pathname = url.pathname;
+
+    if (pathname.startsWith("/api/")) {
+        handleApiRequest(request, response, pathname).catch((error) => sendError(response, error));
+        return;
+    }
+
+    handleStaticRequest(request, response, pathname);
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, "0.0.0.0", () => {
     console.log("Hardware Setup Manager");
     console.log(`[INFO] Server running on http://localhost:${PORT}`);
     console.log(`[INFO] Database: ${db.DB_PATH}`);

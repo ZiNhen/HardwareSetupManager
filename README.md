@@ -5,10 +5,10 @@ Hardware Setup Manager is a clean, lightweight web app for managing shared hardw
 This branch, `feature/online-multiuser`, runs as one small Node.js process:
 
 ```text
-Browser -> Express static app + REST API -> SQLite
+Browser -> Node.js static app + REST API -> SQLite
 ```
 
-The original local-only version remains on the local/main branch history. This online branch keeps the existing HTML/CSS/Vanilla JavaScript UI and adds shared multi-project persistence.
+The original local-only version remains on the local/main branch history. This online branch keeps the existing HTML/CSS/Vanilla JavaScript UI and adds shared multi-project persistence. A portable `nodejs/` runtime can be kept in the repo so the server PC does not need a separate Node.js install.
 
 ## Features
 
@@ -28,7 +28,6 @@ The original local-only version remains on the local/main branch history. This o
 ## Local Development
 
 ```bash
-npm install
 npm start
 ```
 
@@ -44,7 +43,7 @@ On Windows, you can also double-click:
 start-server.bat
 ```
 
-This is the fewest-step path after cloning: the batch file installs dependencies once if `node_modules` is missing, then starts the server.
+This is the fewest-step path after cloning: the batch file uses `nodejs/node.exe` from the repo when present, then starts the server. No `npm install` step is required.
 
 To run without keeping a terminal open, double-click:
 
@@ -67,19 +66,17 @@ stop-server.bat
 
 ## LAN Deployment
 
-1. Install Node.js 24 LTS or newer on the server PC.
-2. Clone the repository.
-3. Switch to this branch:
+1. Clone the repository onto the server PC. If the repo includes `nodejs/node.exe`, no system Node.js install is required.
+2. Switch to this branch:
 
 ```bash
 git switch feature/online-multiuser
 ```
 
-4. Run in a visible terminal:
+3. Run in a visible terminal:
 
 ```bash
-npm install
-npm start
+start-server.bat
 ```
 
 Or on Windows, use the background launcher:
@@ -175,4 +172,4 @@ Tailscale and Cloudflare Tunnel are deployment options, not source-code dependen
 - No authentication yet.
 - No WebSocket realtime; sync uses lightweight polling.
 - Conflict handling is per-position and intentionally simple.
-- `node:sqlite` keeps dependencies low, but requires Node.js 24+.
+- `node:sqlite` keeps the app dependency-free, but requires Node.js 24+.

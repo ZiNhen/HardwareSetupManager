@@ -2,7 +2,11 @@
 setlocal
 cd /d "%~dp0"
 
-if not defined NODE_EXE set "NODE_EXE=C:\NAR5HC\nodejs\node.exe"
+if not defined NODE_EXE set "NODE_EXE=%~dp0nodejs\node.exe"
+
+if not exist "%NODE_EXE%" (
+    if exist "C:\NAR5HC\nodejs\node.exe" set "NODE_EXE=C:\NAR5HC\nodejs\node.exe"
+)
 
 if not exist "%NODE_EXE%" (
     where node >nul 2>nul
