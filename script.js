@@ -3300,12 +3300,6 @@ function openPositionContextMenu(event, positionId) {
             });
         }
 
-        if (items.length && items.every((item) => item.type === "sensor")) {
-            actions.push({
-                label: "Add Sensor",
-                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
-            });
-        }
     }
 
     if (isEditMode() && boardClipboard && boardClipboard.kind === "selection") {
