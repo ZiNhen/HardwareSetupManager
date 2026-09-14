@@ -1964,6 +1964,20 @@ function renderPositionDetails() {
         message.innerHTML = `<div><strong>${escapeHtml(getDisplayPositionLabel(positionId))}</strong><br>Empty position</div>`;
         container.appendChild(message);
 
+        if (isEditMode()) {
+            container.appendChild(createActionGroup([
+                {
+                    label: "Add Hardware",
+                    className: "secondary-button",
+                    handler: () => openHardwareEditor({
+                        positionId,
+                        mode: "create",
+                        initialType: getInitialTypeFromPreset(getFixedPreset(positionId))
+                    })
+                }
+            ]));
+        }
+
         return;
     }
 
@@ -2071,6 +2085,11 @@ function renderSingleItemDetails(container, positionId, item) {
                 className: "ghost-button",
                 handler: () => openHardwareEditor({ positionId, mode: "edit", itemIndex: 0 })
             },
+            item.type === "sensor" ? {
+                label: "Add Sensor",
+                className: "secondary-button",
+                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
+            } : null,
             {
                 label: "Clear Position",
                 className: "danger-button",
@@ -2079,7 +2098,7 @@ function renderSingleItemDetails(container, positionId, item) {
         );
     }
 
-    container.appendChild(createActionGroup(actions));
+    container.appendChild(createActionGroup(actions.filter(Boolean)));
 }
 
 function renderMultipleItemDetails(container, positionId, items) {
@@ -2148,6 +2167,15 @@ function renderMultipleItemDetails(container, positionId, items) {
 
 
     if (isEditMode()) {
+        const allSensors = items.every((item) => item.type === "sensor");
+        if (allSensors) {
+            actions.push({
+                label: "Add Sensor",
+                className: "secondary-button",
+                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
+            });
+        }
+
         actions.push({
             label: "Clear Position",
             className: "danger-button",
@@ -3153,6 +3181,23 @@ function openPositionContextMenu(event, positionId) {
             label: items.length ? "Edit" : "Add Hardware",
             handler: () => openEditorForPosition(positionId)
         });
+
+        if (items.length > 1 && items.every((item) => item.type === "sensor")) {
+            actions.push({
+                label: "Edit Sensor",
+                submenu: items.map((item, index) => ({
+                    label: item.displayName || item.name || `Sensor ${index + 1}`,
+                    handler: () => openHardwareEditor({ positionId, mode: "edit", itemIndex: index })
+                }))
+            });
+        }
+
+        if (items.length && items.every((item) => item.type === "sensor")) {
+            actions.push({
+                label: "Add Sensor",
+                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
+            });
+        }
     }
 
     if (isEditMode() && boardClipboard && boardClipboard.kind === "selection") {
