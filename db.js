@@ -42,6 +42,11 @@ function openDatabase() {
             ecu_name TEXT NOT NULL DEFAULT '',
             part_number TEXT NOT NULL DEFAULT '',
             calibration_id TEXT NOT NULL DEFAULT '',
+            canoe_file_name TEXT NOT NULL DEFAULT '',
+            canoe_file_type TEXT NOT NULL DEFAULT '',
+            canoe_file_size INTEGER NOT NULL DEFAULT 0,
+            canoe_file_data TEXT NOT NULL DEFAULT '',
+            canoe_file_updated_at TEXT NOT NULL DEFAULT '',
             notes TEXT NOT NULL DEFAULT '',
             power_linked INTEGER NOT NULL DEFAULT 1,
             checkpoint_can1 INTEGER NOT NULL DEFAULT 1,
@@ -81,6 +86,21 @@ function migrateDatabase(database) {
         database.exec("ALTER TABLE projects ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;");
         database.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
     }
+    if (!projectColumns.includes("canoe_file_name")) {
+        database.exec("ALTER TABLE projects ADD COLUMN canoe_file_name TEXT NOT NULL DEFAULT '';");
+    }
+    if (!projectColumns.includes("canoe_file_type")) {
+        database.exec("ALTER TABLE projects ADD COLUMN canoe_file_type TEXT NOT NULL DEFAULT '';");
+    }
+    if (!projectColumns.includes("canoe_file_size")) {
+        database.exec("ALTER TABLE projects ADD COLUMN canoe_file_size INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!projectColumns.includes("canoe_file_data")) {
+        database.exec("ALTER TABLE projects ADD COLUMN canoe_file_data TEXT NOT NULL DEFAULT '';");
+    }
+    if (!projectColumns.includes("canoe_file_updated_at")) {
+        database.exec("ALTER TABLE projects ADD COLUMN canoe_file_updated_at TEXT NOT NULL DEFAULT '';");
+    }
     const folderColumns = database.prepare("PRAGMA table_info(folders)").all().map((column) => column.name);
     if (!folderColumns.includes("parent_id")) {
         database.exec("ALTER TABLE folders ADD COLUMN parent_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;");
@@ -117,13 +137,50 @@ function cleanString(value) {
     return typeof value === "string" ? value.trim() : "";
 }
 
+function normalizeCanoeFile(file = null) {
+    if (!file || typeof file !== "object" || Array.isArray(file)) {
+        return null;
+    }
+
+    const name = cleanString(file.name);
+    const data = cleanString(file.data);
+    if (!name || !data) {
+        return null;
+    }
+
+    const size = Number(file.size);
+    return {
+        name,
+        type: cleanString(file.type),
+        size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+        data,
+        updatedAt: cleanString(file.updatedAt) || nowSql()
+    };
+}
+
+function getCanoeFileFromRow(row, includeData = true) {
+    if (!row || !row.canoe_file_name) {
+        return null;
+    }
+
+    return {
+        name: row.canoe_file_name,
+        type: row.canoe_file_type,
+        size: Number(row.canoe_file_size) || 0,
+        data: includeData ? row.canoe_file_data : "",
+        updatedAt: row.canoe_file_updated_at
+    };
+}
+
 function normalizeProject(project = {}) {
+    const canoeFile = normalizeCanoeFile(project.canoeFile);
     return {
         name: cleanString(project.name) || "Untitled Project",
         harness: cleanString(project.harness),
         ecuName: cleanString(project.ecuName),
         partNumber: cleanString(project.partNumber),
         calibrationId: cleanString(project.calibrationId),
+        canoeFile,
         notes: cleanString(project.notes)
     };
 }
@@ -134,12 +191,14 @@ function pickString(source, key, fallback) {
 
 function normalizeProjectPatch(project = {}, existing) {
     const source = project && typeof project === "object" && !Array.isArray(project) ? project : {};
+    const hasCanoeFile = Object.prototype.hasOwnProperty.call(source, "canoeFile");
     return {
         name: pickString(source, "name", existing.name) || "Untitled Project",
         harness: pickString(source, "harness", existing.harness),
         ecuName: pickString(source, "ecuName", existing.ecu_name),
         partNumber: pickString(source, "partNumber", existing.part_number),
         calibrationId: pickString(source, "calibrationId", existing.calibration_id),
+        canoeFile: hasCanoeFile ? normalizeCanoeFile(source.canoeFile) : getCanoeFileFromRow(existing),
         notes: pickString(source, "notes", existing.notes)
     };
 }
@@ -251,6 +310,7 @@ function toProjectSummary(row) {
         ecuName: row.ecu_name,
         partNumber: row.part_number,
         calibrationId: row.calibration_id,
+        canoeFile: getCanoeFileFromRow(row, false),
         notes: row.notes,
         revision: row.revision,
         createdAt: row.created_at,
@@ -271,6 +331,7 @@ function rowToState(row, positionRows = []) {
             ecuName: row.ecu_name,
             partNumber: row.part_number,
             calibrationId: row.calibration_id,
+            canoeFile: getCanoeFileFromRow(row),
             notes: row.notes
         },
         boardOptions: {
@@ -445,10 +506,12 @@ function createProject(payload = {}) {
     const projectId = runTransaction((database) => {
         const result = database.prepare(`
             INSERT INTO projects (
-                folder_id, name, harness, ecu_name, part_number, calibration_id, notes,
+                folder_id, name, harness, ecu_name, part_number, calibration_id,
+                canoe_file_name, canoe_file_type, canoe_file_size, canoe_file_data, canoe_file_updated_at,
+                notes,
                 power_linked, checkpoint_can1, checkpoint_can2, container_can1, container_can2,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             folderId,
             project.name,
@@ -456,6 +519,11 @@ function createProject(payload = {}) {
             project.ecuName,
             project.partNumber,
             project.calibrationId,
+            project.canoeFile ? project.canoeFile.name : "",
+            project.canoeFile ? project.canoeFile.type : "",
+            project.canoeFile ? project.canoeFile.size : 0,
+            project.canoeFile ? project.canoeFile.data : "",
+            project.canoeFile ? project.canoeFile.updatedAt : "",
             project.notes,
             boolToInt(boardOptions.powerLinked),
             boolToInt(checkpointCan.can1),
@@ -512,7 +580,9 @@ function updateProject(projectId, payload = {}) {
 
     openDatabase().prepare(`
         UPDATE projects
-        SET folder_id = ?, name = ?, harness = ?, ecu_name = ?, part_number = ?, calibration_id = ?, notes = ?,
+        SET folder_id = ?, name = ?, harness = ?, ecu_name = ?, part_number = ?, calibration_id = ?,
+            canoe_file_name = ?, canoe_file_type = ?, canoe_file_size = ?, canoe_file_data = ?, canoe_file_updated_at = ?,
+            notes = ?,
             power_linked = ?, checkpoint_can1 = ?, checkpoint_can2 = ?, container_can1 = ?, container_can2 = ?,
             revision = revision + 1, updated_at = ?
         WHERE id = ?
@@ -523,6 +593,11 @@ function updateProject(projectId, payload = {}) {
         project.ecuName,
         project.partNumber,
         project.calibrationId,
+        project.canoeFile ? project.canoeFile.name : "",
+        project.canoeFile ? project.canoeFile.type : "",
+        project.canoeFile ? project.canoeFile.size : 0,
+        project.canoeFile ? project.canoeFile.data : "",
+        project.canoeFile ? project.canoeFile.updatedAt : "",
         project.notes,
         boolToInt(boardOptions.powerLinked),
         boolToInt(checkpointCan.can1),

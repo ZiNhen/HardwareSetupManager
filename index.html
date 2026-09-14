@@ -152,6 +152,10 @@
                         <span>Calibration ID</span>
                         <input type="text" data-project-field="calibrationId" autocomplete="off">
                     </label>
+                    <div class="field field-wide canoe-field">
+                        <span>CANoe</span>
+                        <div class="canoe-attachment" id="canoeAttachment"></div>
+                    </div>
                     <label class="field field-wide">
                         <span>Notes</span>
                         <textarea data-project-field="notes" rows="7"></textarea>
@@ -203,6 +207,7 @@
     </div>
 
     <input id="importFileInput" type="file" accept=".json,application/json" hidden>
+    <input id="canoeFileInput" type="file" hidden>
 
     <div class="modal-overlay" id="modalOverlay" hidden>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

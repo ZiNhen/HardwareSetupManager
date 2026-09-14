@@ -6,7 +6,7 @@ const path = require("node:path");
 const db = require("./db");
 
 const PORT = Number(process.env.PORT) || 3000;
-const BODY_LIMIT_BYTES = 512 * 1024;
+const BODY_LIMIT_BYTES = 50 * 1024 * 1024;
 
 db.openDatabase();
 

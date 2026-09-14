@@ -14,6 +14,7 @@ const PROJECT_BROWSER_POLL_INTERVAL_MS = 5000;
 const POSITION_ROWS = 22;
 const POSITION_COLUMNS = 5;
 const DEFAULT_PROJECT_NAME = "Untitled Project";
+const MAX_CANOE_FILE_BYTES = 35 * 1024 * 1024;
 
 const SETUP_LABELS = {
     checkpoint: "Checkpoint",
@@ -271,6 +272,7 @@ function cacheDom() {
         modeButtons: Array.from(document.querySelectorAll("[data-interaction-mode]")),
         projectInfoForm: document.getElementById("projectInfoForm"),
         projectFields: Array.from(document.querySelectorAll("[data-project-field]")),
+        canoeAttachment: document.getElementById("canoeAttachment"),
         hardwareSearch: document.getElementById("hardwareSearch"),
         clearSearchButton: document.getElementById("clearSearchButton"),
         copySetupButton: document.getElementById("copySetupButton"),
@@ -289,6 +291,7 @@ function cacheDom() {
         projectList: document.getElementById("projectList"),
         workspace: document.querySelector(".workspace"),
         importFileInput: document.getElementById("importFileInput"),
+        canoeFileInput: document.getElementById("canoeFileInput"),
         saveIndicator: document.getElementById("saveIndicator"),
         saveIndicatorText: document.getElementById("saveIndicatorText"),
         mapHint: document.getElementById("mapHint"),
@@ -368,6 +371,7 @@ function bindEvents() {
     dom.helpButton.addEventListener("click", openUsageGuide);
     dom.newProjectButton.addEventListener("click", requestNewProject);
     dom.importFileInput.addEventListener("change", importProject);
+    dom.canoeFileInput.addEventListener("change", attachCanoeFile);
 
     dom.modalOverlay.addEventListener("click", (event) => {
         if (event.target === dom.modalOverlay) {
@@ -443,6 +447,7 @@ function createInitialState() {
             ecuName: "",
             partNumber: "",
             calibrationId: "",
+            canoeFile: null,
             notes: ""
         },
         setups: {
@@ -955,6 +960,7 @@ function projectStateToBrowserSummary(projectState) {
         harness: project.harness || "",
         ecuName: project.ecuName || "",
         partNumber: project.partNumber || "",
+        canoeFile: normalizeCanoeFile(project.canoeFile),
         updatedAt: projectState.updatedAt || new Date().toISOString()
     };
 }
@@ -1737,6 +1743,136 @@ function renderProjectInfo() {
         const key = field.dataset.projectField;
         field.value = appState.project[key] || "";
     });
+    renderCanoeAttachment();
+}
+
+function renderCanoeAttachment() {
+    if (!dom.canoeAttachment) {
+        return;
+    }
+
+    const file = normalizeCanoeFile(appState.project.canoeFile);
+    const editing = isEditMode();
+    dom.canoeAttachment.innerHTML = "";
+
+    const summary = document.createElement("div");
+    summary.className = "canoe-summary";
+    if (file) {
+        summary.innerHTML = `
+            <div class="canoe-file-main">
+                <span class="canoe-file-name">${escapeHtml(file.name)}</span>
+                <span class="canoe-file-meta">${escapeHtml(formatBytes(file.size))}${file.updatedAt ? ` · ${escapeHtml(formatDateTime(file.updatedAt))}` : ""}</span>
+            </div>
+        `;
+    } else {
+        summary.innerHTML = `
+            <div class="canoe-file-main">
+                <span class="canoe-file-name">No CANoe file attached</span>
+                <span class="canoe-file-meta">Attach the CANoe file used for this project.</span>
+            </div>
+        `;
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "canoe-actions";
+
+    if (file) {
+        const downloadButton = document.createElement("button");
+        downloadButton.className = "secondary-button";
+        downloadButton.type = "button";
+        downloadButton.textContent = "Download";
+        downloadButton.addEventListener("click", downloadCanoeFile);
+        actions.appendChild(downloadButton);
+    }
+
+    if (editing) {
+        const attachButton = document.createElement("button");
+        attachButton.className = "secondary-button";
+        attachButton.type = "button";
+        attachButton.textContent = file ? "Replace" : "Attach";
+        attachButton.addEventListener("click", () => dom.canoeFileInput.click());
+        actions.appendChild(attachButton);
+
+        if (file) {
+            const removeButton = document.createElement("button");
+            removeButton.className = "danger-button";
+            removeButton.type = "button";
+            removeButton.textContent = "Remove";
+            removeButton.addEventListener("click", removeCanoeFile);
+            actions.appendChild(removeButton);
+        }
+    }
+
+    dom.canoeAttachment.append(summary, actions);
+}
+
+function attachCanoeFile(event) {
+    const input = event.target;
+    const file = input.files && input.files[0];
+    if (!file) {
+        return;
+    }
+
+    if (!isEditMode()) {
+        input.value = "";
+        showToast("Switch to Edit mode to attach CANoe");
+        return;
+    }
+
+    if (file.size > MAX_CANOE_FILE_BYTES) {
+        input.value = "";
+        showToast("CANoe file is too large");
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+        appState.project.canoeFile = {
+            name: normalizeString(file.name),
+            type: normalizeString(file.type),
+            size: file.size,
+            data: String(reader.result || ""),
+            updatedAt: new Date().toISOString()
+        };
+        input.value = "";
+        saveToLocalStorage();
+        flushProjectSaveNow();
+        renderProjectInfo();
+        showToast("CANoe attached");
+    });
+    reader.addEventListener("error", () => {
+        input.value = "";
+        showToast("Failed to attach CANoe");
+    });
+    reader.readAsDataURL(file);
+}
+
+function downloadCanoeFile() {
+    const file = normalizeCanoeFile(appState.project.canoeFile);
+    if (!file) {
+        showToast("No CANoe file attached");
+        return;
+    }
+
+    const link = document.createElement("a");
+    link.href = file.data;
+    link.download = file.name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+
+function removeCanoeFile() {
+    if (!isEditMode()) {
+        showToast("Switch to Edit mode to remove CANoe");
+        return;
+    }
+
+    appState.project.canoeFile = null;
+    saveToLocalStorage();
+    flushProjectSaveNow();
+    renderProjectInfo();
+    showToast("CANoe removed");
 }
 
 function renderSetupTabs() {
@@ -4165,6 +4301,7 @@ function generateSetupText(setupName) {
         `ECU: ${normalized.project.ecuName || "-"}`,
         `Part Number: ${normalized.project.partNumber || "-"}`,
         `Calibration ID: ${normalized.project.calibrationId || "-"}`,
+        `CANoe: ${normalized.project.canoeFile ? normalized.project.canoeFile.name : "-"}`,
         `CAN Channels: ${generateCanSummaryText(setupName)}`
     ];
 
@@ -4771,7 +4908,29 @@ function normalizeProject(project) {
         ecuName: normalizeString(source.ecuName),
         partNumber: normalizeString(source.partNumber),
         calibrationId: normalizeString(source.calibrationId),
+        canoeFile: normalizeCanoeFile(source.canoeFile),
         notes: normalizeString(source.notes)
+    };
+}
+
+function normalizeCanoeFile(file) {
+    if (!isPlainObject(file)) {
+        return null;
+    }
+
+    const name = normalizeString(file.name);
+    const data = normalizeString(file.data);
+    if (!name || !data) {
+        return null;
+    }
+
+    const size = Number(file.size);
+    return {
+        name,
+        type: normalizeString(file.type),
+        size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+        data,
+        updatedAt: normalizeString(file.updatedAt)
     };
 }
 
@@ -5261,6 +5420,7 @@ function hasProjectData() {
         || project.ecuName
         || project.partNumber
         || project.calibrationId
+        || project.canoeFile
         || project.notes;
     const hasPositions = Object.keys(normalized.setups.checkpoint.positions).length > 0
         || Object.keys(normalized.setups.container.positions).length > 0;
@@ -5301,6 +5461,39 @@ function sanitizeFilename(name) {
         .replace(/[^a-z0-9]+/gi, "_")
         .replace(/^_+|_+$/g, "");
     return cleaned || "Untitled_Project";
+}
+
+function formatBytes(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) {
+        return "Unknown size";
+    }
+
+    const units = ["B", "KB", "MB", "GB"];
+    let size = value;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex += 1;
+    }
+
+    const decimals = unitIndex === 0 || size >= 10 ? 0 : 1;
+    return `${size.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function formatDateTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    return date.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+    });
 }
 
 function makeDisplayNameFromName(name) {

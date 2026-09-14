@@ -739,6 +739,53 @@ textarea:focus-visible,
     outline: 0;
 }
 
+.canoe-attachment {
+    display: grid;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-secondary);
+    padding: 10px;
+}
+
+.canoe-summary {
+    min-width: 0;
+}
+
+.canoe-file-main {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.canoe-file-name {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 740;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.canoe-file-meta {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+
+.canoe-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.canoe-actions .secondary-button,
+.canoe-actions .danger-button {
+    min-height: 32px;
+    padding: 6px 10px;
+    font-size: 0.8rem;
+}
+
 .map-panel-header {
     display: flex;
     align-items: flex-start;
