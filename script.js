@@ -1761,14 +1761,14 @@ function renderCanoeAttachment() {
         summary.innerHTML = `
             <div class="canoe-file-main">
                 <span class="canoe-file-name">${escapeHtml(file.name)}</span>
-                <span class="canoe-file-meta">${escapeHtml(formatBytes(file.size))}${file.updatedAt ? ` · ${escapeHtml(formatDateTime(file.updatedAt))}` : ""}</span>
+                <span class="canoe-file-meta">${escapeHtml(formatBytes(file.size))}${file.updatedAt ? ` · ${escapeHtml(formatDateTime(file.updatedAt))}` : ""} · Max ${escapeHtml(formatBytes(MAX_CANOE_FILE_BYTES))}</span>
             </div>
         `;
     } else {
         summary.innerHTML = `
             <div class="canoe-file-main">
                 <span class="canoe-file-name">No CANoe file attached</span>
-                <span class="canoe-file-meta">Attach the CANoe file used for this project.</span>
+                <span class="canoe-file-meta">Attach the CANoe file used for this project. Max ${escapeHtml(formatBytes(MAX_CANOE_FILE_BYTES))}.</span>
             </div>
         `;
     }
@@ -1821,7 +1821,7 @@ function attachCanoeFile(event) {
 
     if (file.size > MAX_CANOE_FILE_BYTES) {
         input.value = "";
-        showToast("CANoe file is too large");
+        showToast(`CANoe file is too large. Max ${formatBytes(MAX_CANOE_FILE_BYTES)}`);
         return;
     }
 

@@ -10,6 +10,7 @@ const SETUP_TYPES = new Set(["checkpoint", "container"]);
 const HARDWARE_TYPES = new Set(["squib", "aod", "sensor", "physicalSwitch", "mechanicalSwitch"]);
 const POSITION_PATTERN = /^R(0[1-9]|1[0-9]|2[0-2])C[1-5]$/;
 const DEFAULT_CAN_CHANNELS = { can1: true, can2: false };
+const MAX_CANOE_FILE_BYTES = 35 * 1024 * 1024;
 
 let db;
 
@@ -137,6 +138,27 @@ function cleanString(value) {
     return typeof value === "string" ? value.trim() : "";
 }
 
+function createPayloadTooLargeError() {
+    const error = new Error("CANoe file is too large. Maximum size is 35 MB.");
+    error.status = 413;
+    return error;
+}
+
+function getDataUrlByteSize(data) {
+    const commaIndex = data.indexOf(",");
+    if (data.startsWith("data:") && commaIndex >= 0) {
+        const header = data.slice(0, commaIndex).toLowerCase();
+        const body = data.slice(commaIndex + 1).replace(/\s/g, "");
+        if (header.includes(";base64")) {
+            const padding = body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0;
+            return Math.max(0, Math.floor((body.length * 3) / 4) - padding);
+        }
+        return Buffer.byteLength(decodeURIComponent(body), "utf8");
+    }
+
+    return Buffer.byteLength(data, "utf8");
+}
+
 function normalizeCanoeFile(file = null) {
     if (!file || typeof file !== "object" || Array.isArray(file)) {
         return null;
@@ -149,10 +171,16 @@ function normalizeCanoeFile(file = null) {
     }
 
     const size = Number(file.size);
+    const dataSize = getDataUrlByteSize(data);
+    const normalizedSize = Number.isFinite(size) && size > 0 ? Math.round(size) : dataSize;
+    if (normalizedSize > MAX_CANOE_FILE_BYTES || dataSize > MAX_CANOE_FILE_BYTES) {
+        throw createPayloadTooLargeError();
+    }
+
     return {
         name,
         type: cleanString(file.type),
-        size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+        size: normalizedSize,
         data,
         updatedAt: cleanString(file.updatedAt) || nowSql()
     };
