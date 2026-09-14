@@ -27,9 +27,11 @@ function openDatabase() {
 
         CREATE TABLE IF NOT EXISTS folders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER,
             name TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE SET NULL
         );
 
         CREATE TABLE IF NOT EXISTS projects (
@@ -69,14 +71,20 @@ function openDatabase() {
     `);
     migrateDatabase(db);
     db.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);");
     return db;
 }
 
 function migrateDatabase(database) {
-    const columns = database.prepare("PRAGMA table_info(projects)").all().map((column) => column.name);
-    if (!columns.includes("folder_id")) {
+    const projectColumns = database.prepare("PRAGMA table_info(projects)").all().map((column) => column.name);
+    if (!projectColumns.includes("folder_id")) {
         database.exec("ALTER TABLE projects ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;");
         database.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
+    }
+    const folderColumns = database.prepare("PRAGMA table_info(folders)").all().map((column) => column.name);
+    if (!folderColumns.includes("parent_id")) {
+        database.exec("ALTER TABLE folders ADD COLUMN parent_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;");
+        database.exec("CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);");
     }
 }
 
@@ -311,10 +319,11 @@ function listProjects() {
 
 function listFolders() {
     return openDatabase()
-        .prepare("SELECT id, name, created_at, updated_at FROM folders ORDER BY name COLLATE NOCASE ASC")
+        .prepare("SELECT id, parent_id, name, created_at, updated_at FROM folders ORDER BY name COLLATE NOCASE ASC")
         .all()
         .map((folder) => ({
             id: folder.id,
+            parentFolderId: folder.parent_id,
             name: folder.name,
             createdAt: folder.created_at,
             updatedAt: folder.updated_at
@@ -329,12 +338,14 @@ function createFolder(payload = {}) {
         throw error;
     }
 
+    const parentFolderId = requireFolder(payload.parentFolderId);
     const timestamp = nowSql();
     const result = openDatabase()
-        .prepare("INSERT INTO folders (name, created_at, updated_at) VALUES (?, ?, ?)")
-        .run(name, timestamp, timestamp);
+        .prepare("INSERT INTO folders (parent_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        .run(parentFolderId, name, timestamp, timestamp);
     return {
         id: Number(result.lastInsertRowid),
+        parentFolderId,
         name,
         createdAt: timestamp,
         updatedAt: timestamp
@@ -351,13 +362,23 @@ function updateFolder(folderId, payload = {}) {
     }
 
     const name = cleanString(payload.name) || existing.name;
+    const parentFolderId = Object.prototype.hasOwnProperty.call(payload, "parentFolderId")
+        ? requireFolder(payload.parentFolderId)
+        : existing.parent_id;
+    if (parentFolderId === id || isFolderDescendant(parentFolderId, id)) {
+        const error = new Error("Folder cannot be moved into itself");
+        error.status = 400;
+        throw error;
+    }
+
     const timestamp = nowSql();
     openDatabase()
-        .prepare("UPDATE folders SET name = ?, updated_at = ? WHERE id = ?")
-        .run(name, timestamp, id);
+        .prepare("UPDATE folders SET parent_id = ?, name = ?, updated_at = ? WHERE id = ?")
+        .run(parentFolderId, name, timestamp, id);
 
     return {
         id,
+        parentFolderId,
         name,
         createdAt: existing.created_at,
         updatedAt: timestamp
@@ -387,6 +408,18 @@ function requireFolder(folderId) {
         throw error;
     }
     return id;
+}
+
+function isFolderDescendant(folderId, ancestorId) {
+    let currentId = normalizeFolderId(folderId);
+    while (currentId !== null) {
+        if (currentId === ancestorId) {
+            return true;
+        }
+        const folder = openDatabase().prepare("SELECT parent_id FROM folders WHERE id = ?").get(currentId);
+        currentId = folder ? normalizeFolderId(folder.parent_id) : null;
+    }
+    return false;
 }
 
 function getProject(projectId) {

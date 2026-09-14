@@ -705,8 +705,8 @@ function renderProjectBrowserList() {
     const query = normalizeSearch(projectBrowserState.query);
     const currentFolder = getBrowserCurrentFolder();
     const folders = projectBrowserState.folders.filter((folder) => {
-        if (projectBrowserState.currentFolderId && !query) {
-            return false;
+        if (!query) {
+            return String(folder.parentFolderId || "") === String(projectBrowserState.currentFolderId || "");
         }
         return !query || normalizeSearch(folder.name).includes(query);
     });
@@ -761,7 +761,7 @@ function renderProjectBrowserPath(currentFolder) {
             </svg>
             <span>Back</span>
         `;
-        back.addEventListener("click", () => openBrowserFolder(null));
+        back.addEventListener("click", () => openBrowserFolder(currentFolder.parentFolderId || null));
         path.appendChild(back);
     }
 
@@ -777,6 +777,11 @@ function renderProjectBrowserPath(currentFolder) {
         const projectId = event.dataTransfer.getData("text/project-id");
         if (projectId) {
             await moveProjectToFolder(projectId, null);
+            return;
+        }
+        const folderId = event.dataTransfer.getData("text/folder-id");
+        if (folderId) {
+            await moveFolderToFolder(folderId, null);
         }
     });
     path.appendChild(root);
@@ -812,6 +817,11 @@ function renderProjectGroup(title, items) {
 function createFolderCard(folder) {
     const card = createBrowserItemCard("folder", folder.id);
     card.classList.add("project-folder-card");
+    card.draggable = true;
+    card.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData("text/folder-id", String(folder.id));
+        event.dataTransfer.effectAllowed = "move";
+    });
     card.addEventListener("dblclick", () => openBrowserFolder(folder.id));
     card.addEventListener("contextmenu", (event) => openFolderContextMenu(event, folder));
     card.addEventListener("dragover", (event) => {
@@ -825,6 +835,11 @@ function createFolderCard(folder) {
         const projectId = event.dataTransfer.getData("text/project-id");
         if (projectId) {
             await moveProjectToFolder(projectId, folder.id);
+            return;
+        }
+        const folderId = event.dataTransfer.getData("text/folder-id");
+        if (folderId) {
+            await moveFolderToFolder(folderId, folder.id);
         }
     });
 
@@ -949,6 +964,16 @@ function openBrowserFolder(folderId) {
     renderProjectBrowserList();
 }
 
+function folderStateToBrowserSummary(folderState) {
+    return {
+        id: folderState.id,
+        parentFolderId: folderState.parentFolderId || null,
+        name: folderState.name,
+        createdAt: folderState.createdAt || new Date().toISOString(),
+        updatedAt: folderState.updatedAt || new Date().toISOString()
+    };
+}
+
 function getSelectedBrowserItem() {
     if (!projectBrowserState.selectedItem || dom.projectBrowser.hidden) {
         return null;
@@ -980,7 +1005,13 @@ function handleProjectBrowserKeyboardShortcut(event) {
 
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && selected) {
         event.preventDefault();
-        copyBrowserItem(selected.kind, selected.value);
+        copyBrowserItem(selected.kind, selected.value, "copy");
+        return true;
+    }
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x" && selected) {
+        event.preventDefault();
+        copyBrowserItem(selected.kind, selected.value, "cut");
         return true;
     }
 
@@ -1026,6 +1057,18 @@ function openFolderContextMenu(event, folder) {
     event.preventDefault();
     event.stopPropagation();
     selectProjectBrowserItem("folder", folder.id);
+    const moveOptions = [
+        {
+            label: "Root",
+            handler: () => moveFolderToFolder(folder.id, null)
+        },
+        ...projectBrowserState.folders
+            .filter((item) => String(item.id) !== String(folder.id))
+            .map((item) => ({
+                label: item.name,
+                handler: () => moveFolderToFolder(folder.id, item.id)
+            }))
+    ];
     const actions = [
         {
             label: "Open",
@@ -1033,7 +1076,11 @@ function openFolderContextMenu(event, folder) {
         },
         {
             label: "Copy",
-            handler: () => copyBrowserItem("folder", folder)
+            handler: () => copyBrowserItem("folder", folder, "copy")
+        },
+        {
+            label: "Cut",
+            handler: () => copyBrowserItem("folder", folder, "cut")
         },
         {
             label: "Paste",
@@ -1047,6 +1094,10 @@ function openFolderContextMenu(event, folder) {
         {
             label: "Rename",
             handler: () => openRenameFolderModal(folder)
+        },
+        {
+            label: "Move To",
+            submenu: moveOptions
         },
         {
             label: "Delete Folder",
@@ -1079,7 +1130,11 @@ function openProjectContextMenu(event, project) {
         },
         {
             label: "Copy",
-            handler: () => copyBrowserItem("project", project)
+            handler: () => copyBrowserItem("project", project, "copy")
+        },
+        {
+            label: "Cut",
+            handler: () => copyBrowserItem("project", project, "cut")
         },
         {
             label: "Paste",
@@ -1140,13 +1195,15 @@ function openProjectBrowserContextMenu(event, force = false) {
     placePositionContextMenu(event.clientX, event.clientY);
 }
 
-function copyBrowserItem(kind, item) {
+function copyBrowserItem(kind, item, operation = "copy") {
     projectBrowserState.clipboard = {
+        operation,
         kind,
         id: String(item.id),
         name: item.name || DEFAULT_PROJECT_NAME
     };
-    showToast(kind === "folder" ? "Folder copied" : "Project copied");
+    const action = operation === "cut" ? "cut" : "copied";
+    showToast(kind === "folder" ? `Folder ${action}` : `Project ${action}`);
 }
 
 async function pasteBrowserItem(targetFolderId) {
@@ -1161,7 +1218,13 @@ async function pasteBrowserItem(targetFolderId) {
             showToast("Folder not found");
             return;
         }
-        await duplicateFolder(folder);
+        if (projectBrowserState.clipboard.operation === "cut") {
+            if (await moveFolderToFolder(folder.id, targetFolderId)) {
+                projectBrowserState.clipboard = null;
+            }
+        } else {
+            await duplicateFolder(folder, targetFolderId);
+        }
         return;
     }
 
@@ -1170,6 +1233,13 @@ async function pasteBrowserItem(targetFolderId) {
         showToast("Project not found");
         return;
     }
+    if (projectBrowserState.clipboard.operation === "cut") {
+        if (await moveProjectToFolder(project.id, targetFolderId)) {
+            projectBrowserState.clipboard = null;
+        }
+        return;
+    }
+
     await duplicateProject(project, targetFolderId);
 }
 
@@ -1191,11 +1261,12 @@ async function duplicateProject(project, targetFolderId) {
     }
 }
 
-async function duplicateFolder(folder) {
+async function duplicateFolder(folder, targetParentFolderId = folder.parentFolderId || null) {
     setSaveIndicator("Saving...", "saving");
     try {
         const folderData = await storage.createFolder({
-            name: createCopyName(folder.name, projectBrowserState.folders.map((item) => item.name))
+            name: createCopyName(folder.name, projectBrowserState.folders.map((item) => item.name)),
+            parentFolderId: targetParentFolderId || null
         });
         const sourceProjects = projectBrowserState.projects.filter((project) => String(project.folderId || "") === String(folder.id));
         for (const project of sourceProjects) {
@@ -1214,6 +1285,31 @@ async function duplicateFolder(folder) {
     } catch (error) {
         setSaveIndicator("Offline", "error");
         showToast("Failed to duplicate folder");
+    }
+}
+
+async function moveFolderToFolder(folderId, parentFolderId) {
+    if (String(folderId) === String(parentFolderId || "")) {
+        showToast("Cannot move folder into itself");
+        return false;
+    }
+
+    try {
+        const folder = projectBrowserState.folders.find((item) => String(item.id) === String(folderId));
+        const data = await storage.updateFolder(folderId, {
+            name: folder ? folder.name : undefined,
+            parentFolderId: parentFolderId || null
+        });
+        const index = projectBrowserState.folders.findIndex((item) => String(item.id) === String(folderId));
+        if (index >= 0) {
+            projectBrowserState.folders[index] = folderStateToBrowserSummary(data.folder);
+        }
+        renderProjectBrowserList();
+        showToast(parentFolderId ? "Folder moved" : "Folder moved to Root");
+        return true;
+    } catch (error) {
+        showToast("Failed to move folder");
+        return false;
     }
 }
 
@@ -1239,8 +1335,11 @@ function openNewFolderModal() {
         fieldLabel: "Folder Name",
         initialValue: "",
         onSubmit: async (name) => {
-            const data = await storage.createFolder({ name });
-            projectBrowserState.folders.push(data.folder);
+            const data = await storage.createFolder({
+                name,
+                parentFolderId: projectBrowserState.currentFolderId || null
+            });
+            projectBrowserState.folders.push(folderStateToBrowserSummary(data.folder));
             projectBrowserState.folders.sort((a, b) => a.name.localeCompare(b.name));
             showToast("Folder created");
             closeModal();
@@ -1260,7 +1359,7 @@ function openRenameFolderModal(folder) {
             const data = await storage.updateFolder(folder.id, { name });
             const index = projectBrowserState.folders.findIndex((item) => String(item.id) === String(folder.id));
             if (index >= 0) {
-                projectBrowserState.folders[index] = data.folder;
+                projectBrowserState.folders[index] = folderStateToBrowserSummary(data.folder);
             }
             projectBrowserState.folders.sort((a, b) => a.name.localeCompare(b.name));
             showToast("Folder renamed");
@@ -1369,6 +1468,9 @@ function requestDeleteFolder(folder) {
             projectBrowserState.projects = projectBrowserState.projects.map((project) => (
                 String(project.folderId || "") === String(folder.id) ? { ...project, folderId: null } : project
             ));
+            projectBrowserState.folders = projectBrowserState.folders.map((item) => (
+                String(item.parentFolderId || "") === String(folder.id) ? { ...item, parentFolderId: null } : item
+            ));
             if (String(projectBrowserState.currentFolderId || "") === String(folder.id)) {
                 projectBrowserState.currentFolderId = null;
             }
@@ -1390,8 +1492,10 @@ async function moveProjectToFolder(projectId, folderId) {
         }
         renderProjectBrowserList();
         showToast(folderId ? "Project moved" : "Project moved to Root");
+        return true;
     } catch (error) {
         showToast("Failed to move project");
+        return false;
     }
 }
 
@@ -4294,7 +4398,7 @@ function openUsageGuide() {
             <div class="guide-list">
                 <section class="guide-section">
                     <h3>Project Browser</h3>
-                    <p>Folders and projects behave like a lightweight file explorer. Use Back to return to All Projects, click once to select, double-click or press Enter to open, Ctrl+C copies, Ctrl+V pastes, F2 renames, Delete removes, and right-click opens actions such as Copy, Paste, Duplicate, Rename, and Move To. The browser refreshes automatically while it is open.</p>
+                    <p>Folders and projects behave like a lightweight file explorer. Use Back to return to the parent folder or All Projects, click once to select, double-click or press Enter to open, Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes, F2 renames, Delete removes, and right-click opens actions such as Copy, Cut, Paste, Duplicate, Rename, and Move To. The browser refreshes automatically while it is open.</p>
                 </section>
                 <section class="guide-section">
                     <h3>View mode</h3>
