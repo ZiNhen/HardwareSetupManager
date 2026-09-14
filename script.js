@@ -376,12 +376,13 @@ function bindEvents() {
     });
 
     document.addEventListener("click", (event) => {
-        clearSelectionOnOutsideGridClick(event);
-
-        if (dom.positionContextMenu.hidden || dom.positionContextMenu.contains(event.target)) {
+        if (!dom.positionContextMenu.hidden && dom.positionContextMenu.contains(event.target)) {
             return;
         }
-        hidePositionContextMenu();
+        clearSelectionOnOutsideGridClick(event);
+        if (!dom.positionContextMenu.hidden) {
+            hidePositionContextMenu();
+        }
     });
 
     document.addEventListener("scroll", hidePositionContextMenu, true);
@@ -1964,20 +1965,6 @@ function renderPositionDetails() {
         message.innerHTML = `<div><strong>${escapeHtml(getDisplayPositionLabel(positionId))}</strong><br>Empty position</div>`;
         container.appendChild(message);
 
-        if (isEditMode()) {
-            container.appendChild(createActionGroup([
-                {
-                    label: "Add Hardware",
-                    className: "secondary-button",
-                    handler: () => openHardwareEditor({
-                        positionId,
-                        mode: "create",
-                        initialType: getInitialTypeFromPreset(getFixedPreset(positionId))
-                    })
-                }
-            ]));
-        }
-
         return;
     }
 
@@ -2085,11 +2072,6 @@ function renderSingleItemDetails(container, positionId, item) {
                 className: "ghost-button",
                 handler: () => openHardwareEditor({ positionId, mode: "edit", itemIndex: 0 })
             },
-            item.type === "sensor" ? {
-                label: "Add Sensor",
-                className: "secondary-button",
-                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
-            } : null,
             {
                 label: "Clear Position",
                 className: "danger-button",
@@ -2165,17 +2147,7 @@ function renderMultipleItemDetails(container, positionId, items) {
         }
     ];
 
-
     if (isEditMode()) {
-        const allSensors = items.every((item) => item.type === "sensor");
-        if (allSensors) {
-            actions.push({
-                label: "Add Sensor",
-                className: "secondary-button",
-                handler: () => openHardwareEditor({ positionId, mode: "addSensor", fixedType: "sensor" })
-            });
-        }
-
         actions.push({
             label: "Clear Position",
             className: "danger-button",
@@ -3255,7 +3227,8 @@ function renderUtilityContextMenu(utility) {
         button.className = "context-menu-button";
         button.setAttribute("role", "menuitem");
         button.textContent = appState.boardOptions.powerLinked ? "Separate Sources" : "Link Sources";
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
             hidePositionContextMenu();
             togglePowerLink();
         });
@@ -3268,7 +3241,8 @@ function renderUtilityContextMenu(utility) {
         button.className = "context-menu-button";
         button.setAttribute("role", "menuitem");
         button.textContent = isCanChannelActive(utility.channelKey) ? "Set Not Used" : "Set Used";
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
             hidePositionContextMenu();
             toggleCanChannel(utility.channelKey);
         });
@@ -3277,7 +3251,7 @@ function renderUtilityContextMenu(utility) {
 }
 
 function shouldShowSetPositionSubmenu(preset) {
-    return preset && (preset.type === "sensor" || preset.kind === "switch");
+    return Boolean(preset && (preset.type || preset.kind === "switch"));
 }
 
 function createSetPositionSubmenuAction(preset, targetIds, items) {
@@ -3292,6 +3266,18 @@ function createSetPositionSubmenuAction(preset, targetIds, items) {
                 {
                     label: "Physical Switch",
                     handler: () => setPositionsToQuickType(targetIds, "physicalSwitch")
+                }
+            ]
+        };
+    }
+
+    if (preset.type !== "sensor") {
+        return {
+            label: "Set Position To",
+            submenu: [
+                {
+                    label: getTypeLabel(preset.type),
+                    handler: () => setPositionsToQuickType(targetIds, preset.type)
                 }
             ]
         };
@@ -3377,7 +3363,8 @@ function renderPositionContextMenu(actions, preset) {
         button.className = `context-menu-button ${action.className || ""}`.trim();
         button.setAttribute("role", "menuitem");
         button.textContent = action.label;
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
             hidePositionContextMenu();
             action.handler();
         });
@@ -3406,7 +3393,8 @@ function createContextSubmenu(action) {
         button.className = `context-menu-button ${item.className || ""}`.trim();
         button.setAttribute("role", "menuitem");
         button.textContent = item.label;
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
             hidePositionContextMenu();
             item.handler();
         });
@@ -4456,7 +4444,7 @@ function openUsageGuide() {
                 </section>
                 <section class="guide-section">
                     <h3>Context menu</h3>
-                    <p>Right-click a cell to edit hardware details, copy position info, paste a copied selection, clear hardware, or open Set Position To for fixed sensor and switch positions.</p>
+                    <p>Right-click a cell to edit hardware details, copy position info, paste a copied selection, clear hardware, or open Set Position To for fixed hardware positions.</p>
                 </section>
                 <section class="guide-section">
                     <h3>Keyboard shortcuts</h3>
