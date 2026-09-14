@@ -1885,6 +1885,7 @@ function renderPosition(button, positionId, items, preset) {
 
     const typeKey = getDominantType(items);
     const type = HARDWARE_TYPES[typeKey] || HARDWARE_TYPES.sensor;
+    const allSensors = items.every((item) => item.type === "sensor");
     button.classList.add("is-filled", type.cssClass);
     button.classList.toggle("is-preset-exception", Boolean(preset && isPresetException(preset, items)));
 
@@ -1896,7 +1897,7 @@ function renderPosition(button, positionId, items, preset) {
     firstLine.textContent = items[0].displayName || items[0].name;
     firstRow.appendChild(firstLine);
 
-    if (items.length > 2) {
+    if ((allSensors && items.length > 1) || (!allSensors && items.length > 2)) {
         const count = document.createElement("span");
         count.className = "position-count";
         count.textContent = `+${items.length - 1}`;
@@ -1905,7 +1906,7 @@ function renderPosition(button, positionId, items, preset) {
 
     button.appendChild(firstRow);
 
-    if (items.length === 2) {
+    if (!allSensors && items.length === 2) {
         const row = document.createElement("span");
         row.className = "position-second-row";
 
