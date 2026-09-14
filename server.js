@@ -36,6 +36,24 @@ function sendNoContent(response) {
     response.end();
 }
 
+function createLightProjectResponse(project) {
+    if (!project || !project.project) {
+        return project;
+    }
+
+    const canoeFile = project.project.canoeFile
+        ? { ...project.project.canoeFile, data: "" }
+        : null;
+
+    return {
+        ...project,
+        project: {
+            ...project.project,
+            canoeFile
+        }
+    };
+}
+
 function sendError(response, error) {
     const status = Number(error.status) || 500;
     const code = status === 409 ? "conflict"
@@ -190,7 +208,7 @@ async function handleApiRequest(request, response, pathname) {
     if (method === "POST" && pathname === "/api/projects") {
         const project = db.createProject(await readRequestBody(request));
         console.log(`[INFO] Project created: ${project.id} ${project.project.name}`);
-        sendJson(response, { project }, 201);
+        sendJson(response, { project: createLightProjectResponse(project) }, 201);
         return;
     }
 
@@ -236,7 +254,7 @@ async function handleApiRequest(request, response, pathname) {
     }
     if (params && method === "PATCH") {
         const project = db.updateProject(params.projectId, await readRequestBody(request));
-        sendJson(response, { project });
+        sendJson(response, { project: createLightProjectResponse(project) });
         return;
     }
     if (params && method === "DELETE") {
