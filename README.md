@@ -46,6 +46,25 @@ start-server.bat
 
 This is the fewest-step path after cloning: the batch file installs dependencies once if `node_modules` is missing, then starts the server.
 
+To run without keeping a terminal open, double-click:
+
+```text
+start-background.bat
+```
+
+It starts `server.js` as a hidden Node.js process and writes logs to:
+
+```text
+logs/server.log
+logs/server-error.log
+```
+
+To stop the background server, double-click:
+
+```text
+stop-server.bat
+```
+
 ## LAN Deployment
 
 1. Install Node.js 24 LTS or newer on the server PC.
@@ -56,11 +75,17 @@ This is the fewest-step path after cloning: the batch file installs dependencies
 git switch feature/online-multiuser
 ```
 
-4. Run:
+4. Run in a visible terminal:
 
 ```bash
 npm install
 npm start
+```
+
+Or on Windows, use the background launcher:
+
+```text
+start-background.bat
 ```
 
 Other trusted devices on the same LAN can open:
