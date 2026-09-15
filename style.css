@@ -423,12 +423,17 @@ textarea:focus-visible,
 }
 
 .project-browser {
+    min-height: 0;
     padding: 28px;
 }
 
 .project-browser-card {
+    max-height: calc(100vh - 56px);
     max-width: 980px;
     margin: 0 auto;
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface);
@@ -482,7 +487,27 @@ textarea:focus-visible,
 
 .project-list {
     display: grid;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     gap: 10px;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+}
+
+.project-list::-webkit-scrollbar {
+    width: 8px;
+}
+
+.project-list::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--border-strong);
+}
+
+.project-list::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 .project-browser-path {
