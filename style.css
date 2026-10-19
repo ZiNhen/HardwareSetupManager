@@ -424,10 +424,14 @@ textarea:focus-visible,
 
 .project-browser {
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
     padding: 28px;
 }
 
 .project-browser-card {
+    width: 100%;
     max-height: calc(100vh - 56px);
     max-width: 980px;
     margin: 0 auto;
@@ -1863,8 +1867,14 @@ textarea:focus-visible,
     padding: 6px;
 }
 
-.context-menu-submenu:hover .context-submenu-panel {
+.context-menu-submenu:hover .context-submenu-panel,
+.context-menu-submenu:focus-within .context-submenu-panel {
     display: block;
+}
+
+.context-menu-submenu.opens-left::after {
+    left: auto;
+    right: 100%;
 }
 
 .context-menu-hint {
@@ -1899,6 +1909,10 @@ textarea:focus-visible,
 }
 
 @media (min-width: 981px) {
+    .project-browser-card {
+        max-height: 100%;
+    }
+
     body {
         overflow: hidden;
     }

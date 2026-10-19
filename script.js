@@ -235,11 +235,17 @@ let undoStack = [];
 let redoStack = [];
 let historySnapshot = null;
 const MAX_HISTORY_STEPS = 80;
-let metadataSaveTimer = null;
+const metadataSaveTimers = new Map();
 let pollingTimer = null;
 let projectBrowserPollingTimer = null;
 let isApplyingRemoteUpdate = false;
 let lastProjectRevision = null;
+let navigationRequest = 0;
+let modalCloseTimer = null;
+let modalReturnFocus = null;
+let projectWriteQueue = Promise.resolve();
+let pendingProjectWrites = 0;
+const queuedPositionRevisions = new Map();
 
 document.addEventListener("DOMContentLoaded", () => {
     initializeApp().catch((error) => {
@@ -339,7 +345,6 @@ function bindEvents() {
             const trimmed = normalizeString(field.value);
             appState.project[key] = trimmed;
             field.value = trimmed;
-            flushProjectSaveNow();
         });
     });
 
@@ -354,7 +359,8 @@ function bindEvents() {
     dom.copySelectionButton.addEventListener("click", copyBoardSelection);
     dom.pasteSelectionButton.addEventListener("click", () => pasteSelectionClipboard());
     dom.allProjectsButton.addEventListener("click", () => {
-        projectBrowserState.currentFolderId = null;
+        projectBrowserState.query = "";
+        dom.projectSearch.value = "";
         showProjectBrowser();
     });
     dom.newFolderButton.addEventListener("click", openNewFolderModal);
@@ -390,13 +396,17 @@ function bindEvents() {
     });
 
     document.addEventListener("scroll", hidePositionContextMenu, true);
+    document.addEventListener("scroll", hideTooltip, true);
     window.addEventListener("resize", hidePositionContextMenu);
+    window.addEventListener("resize", hideTooltip);
     window.addEventListener("popstate", handlePopState);
     document.addEventListener("visibilitychange", () => {
         updatePollingState();
         updateProjectBrowserPollingState();
     });
-    document.addEventListener("pointerup", endPositionDragSelection);
+    document.addEventListener("pointerup", endPositionDragSelection, true);
+    document.addEventListener("pointercancel", endPositionDragSelection);
+    window.addEventListener("blur", endPositionDragSelection);
     dom.projectSearch.addEventListener("input", () => {
         projectBrowserState.query = dom.projectSearch.value;
         renderProjectBrowserList();
@@ -404,6 +414,19 @@ function bindEvents() {
     dom.projectList.addEventListener("contextmenu", openProjectBrowserContextMenu);
 
     document.addEventListener("keydown", (event) => {
+        if (!dom.modalOverlay.hidden && event.key === "Tab") {
+            const controls = Array.from(dom.modalContent.querySelectorAll("button, input, textarea, select, [tabindex='0']"))
+                .filter((element) => !element.disabled && element.getClientRects().length);
+            const first = controls[0];
+            const last = controls[controls.length - 1];
+            if (first && (!dom.modalContent.contains(document.activeElement)
+                || (event.shiftKey && document.activeElement === first)
+                || (!event.shiftKey && document.activeElement === last))) {
+                event.preventDefault();
+                (event.shiftKey ? last : first).focus();
+            }
+            return;
+        }
         if (handleProjectBrowserKeyboardShortcut(event)) {
             return;
         }
@@ -523,7 +546,13 @@ function createGrid() {
             button.setAttribute("aria-label", positionId);
             placeGridCell(button, row, column, getVisualColumnSpan(row, column), 1);
             button.addEventListener("pointerdown", (event) => beginPositionDragSelection(event, positionId));
-            button.addEventListener("pointerenter", () => extendPositionDragSelection(positionId));
+            button.addEventListener("pointerenter", (event) => {
+                if (!(event.buttons & 1)) {
+                    endPositionDragSelection();
+                    return;
+                }
+                extendPositionDragSelection(positionId);
+            });
             button.addEventListener("click", (event) => {
                 if (suppressNextPositionClick) {
                     suppressNextPositionClick = false;
@@ -676,13 +705,13 @@ function setEditorVisible(visible) {
 }
 
 async function showProjectBrowser(options = {}) {
+    const request = ++navigationRequest;
     stopProjectPolling();
+    hidePositionContextMenu();
+    hideTooltip();
     currentProjectId = null;
     appState = createInitialState();
     editorContext = null;
-    if (!boardClipboard || boardClipboard.kind !== "setup") {
-        boardClipboard = null;
-    }
     clearSelectionState();
     setEditorVisible(false);
     setSaveIndicator("Syncing...", "saving");
@@ -692,12 +721,15 @@ async function showProjectBrowser(options = {}) {
             storage.listProjects(),
             storage.listFolders()
         ]);
+        if (request !== navigationRequest) return;
         projectBrowserState.projects = projectData.projects || [];
         projectBrowserState.folders = folderData.folders || [];
+        if (!getBrowserCurrentFolder()) projectBrowserState.currentFolderId = null;
         renderProjectBrowserList();
         startProjectBrowserPolling();
         setSaveIndicator("Online", "saved");
     } catch (error) {
+        if (request !== navigationRequest) return;
         setSaveIndicator("Offline", "error");
         showToast("Server unavailable");
     }
@@ -967,7 +999,11 @@ function projectStateToBrowserSummary(projectState) {
 
 function openBrowserFolder(folderId) {
     projectBrowserState.currentFolderId = folderId ? String(folderId) : null;
+    projectBrowserState.query = "";
+    dom.projectSearch.value = "";
     projectBrowserState.selectedItem = null;
+    hidePositionContextMenu();
+    dom.projectList.scrollTop = 0;
     renderProjectBrowserList();
 }
 
@@ -996,7 +1032,7 @@ function getSelectedBrowserItem() {
 }
 
 function handleProjectBrowserKeyboardShortcut(event) {
-    if (dom.projectBrowser.hidden) {
+    if (dom.projectBrowser.hidden || !dom.modalOverlay.hidden) {
         return false;
     }
     if (isEditableShortcutTarget(event.target)) {
@@ -1507,13 +1543,19 @@ async function moveProjectToFolder(projectId, folderId) {
 }
 
 async function openProject(projectId, options = {}) {
+    const request = ++navigationRequest;
     stopProjectBrowserPolling();
     stopProjectPolling();
+    hidePositionContextMenu();
+    hideTooltip();
     setSaveIndicator("Syncing...", "saving");
 
     try {
         const data = await storage.loadProject(projectId);
+        if (request !== navigationRequest) return;
         currentProjectId = String(data.project.id);
+        projectBrowserState.currentFolderId = data.project.folderId ? String(data.project.folderId) : null;
+        projectBrowserState.selectedItem = null;
         appState = normalizeState({
             ...data.project,
             activeSetup: appState.activeSetup,
@@ -1524,9 +1566,6 @@ async function openProject(projectId, options = {}) {
         undoStack = [];
         redoStack = [];
         editorContext = null;
-        if (!boardClipboard || boardClipboard.kind !== "setup") {
-            boardClipboard = null;
-        }
         clearSelectionState();
         setEditorVisible(true);
         renderApp();
@@ -1536,6 +1575,7 @@ async function openProject(projectId, options = {}) {
             history.pushState({ projectId: currentProjectId }, "", `${window.location.pathname}?project=${encodeURIComponent(currentProjectId)}`);
         }
     } catch (error) {
+        if (request !== navigationRequest) return;
         currentProjectId = null;
         setSaveIndicator("Offline", "error");
         showToast(error.status === 404 ? "Project not found" : "Server unavailable");
@@ -1639,6 +1679,7 @@ async function refreshProjectBrowserItems() {
             storage.listProjects(),
             storage.listFolders()
         ]);
+        if (currentProjectId || dom.projectBrowser.hidden || !dom.modalOverlay.hidden) return;
         projectBrowserState.projects = projectData.projects || [];
         projectBrowserState.folders = folderData.folders || [];
         if (projectBrowserState.currentFolderId && !getBrowserCurrentFolder()) {
@@ -1661,19 +1702,22 @@ function updatePollingState() {
 }
 
 async function pollProjectUpdates() {
-    if (!currentProjectId || isApplyingRemoteUpdate || !dom.modalOverlay.hidden) {
+    if (!currentProjectId || isApplyingRemoteUpdate || pendingProjectWrites || metadataSaveTimers.size || !dom.modalOverlay.hidden) {
         return;
     }
     if (dom.projectInfoForm.contains(document.activeElement) || document.querySelector(".inline-editor")) {
         return;
     }
 
+    const projectId = currentProjectId;
     try {
-        const updates = await storage.getUpdates(currentProjectId);
+        const updates = await storage.getUpdates(projectId);
+        if (projectId !== currentProjectId) return;
         if (lastProjectRevision && updates.revision === lastProjectRevision) {
             return;
         }
-        const data = await storage.loadProject(currentProjectId);
+        const data = await storage.loadProject(projectId);
+        if (editorContext || pendingProjectWrites || metadataSaveTimers.size || dom.projectInfoForm.contains(document.activeElement)) return;
         applyRemoteProject(data.project);
     } catch (error) {
         setSaveIndicator("Offline", "error");
@@ -1686,6 +1730,7 @@ function applyRemoteProject(projectData) {
     }
 
     isApplyingRemoteUpdate = true;
+    projectBrowserState.currentFolderId = projectData.folderId ? String(projectData.folderId) : null;
     appState = normalizeState({
         ...projectData,
         activeSetup: appState.activeSetup,
@@ -1945,7 +1990,7 @@ function renderGrid() {
         }
 
         renderPosition(button, positionId, items, preset);
-        button.classList.toggle("is-selected", shouldShowActiveCell && appState.selectedPosition === positionId);
+        button.classList.toggle("is-selected", shouldShowActiveCell && selectedSet.has(positionId) && appState.selectedPosition === positionId);
         button.classList.toggle("is-selection-member", selectedSet.has(positionId));
         button.classList.toggle("is-search-match", Boolean(searchQuery && matchesSearch));
         button.classList.toggle("is-search-dim", Boolean(searchQuery && !matchesSearch));
@@ -2370,7 +2415,12 @@ function createActionGroup(actions) {
         button.type = "button";
         button.className = action.className;
         button.textContent = action.label;
-        button.addEventListener("click", action.handler);
+        button.addEventListener("click", (event) => {
+            // Details may replace the clicked element before the document handler runs.
+            event.stopPropagation();
+            hidePositionContextMenu();
+            action.handler();
+        });
         group.appendChild(button);
     });
 
@@ -2502,7 +2552,7 @@ function beginPositionDragSelection(event, positionId) {
 }
 
 function extendPositionDragSelection(positionId) {
-    if (!selectionDragStart || !isEditMode()) {
+    if (!selectionDragStart || !isEditMode() || appState.selectedPosition === positionId) {
         return;
     }
 
@@ -3128,6 +3178,8 @@ function switchSetup(setupName) {
     }
 
     hideTooltip();
+    hidePositionContextMenu();
+    endPositionDragSelection();
     appState.activeSetup = setupName;
     appState.selectedPosition = null;
     editorContext = null;
@@ -3181,10 +3233,10 @@ function cutBoardSelection() {
     }
 
     const idsToClear = [...selectedIds];
-    copyBoardSelection().then(() => {
-        clearPositions(idsToClear);
-        showToast("Selection cut");
-    });
+    // The internal clipboard is populated synchronously; OS clipboard latency must not change the cut target.
+    copyBoardSelection();
+    clearPositions(idsToClear);
+    showToast("Selection cut");
 }
 
 function clearSelectionOnOutsideGridClick(event) {
@@ -3212,7 +3264,7 @@ function handleBoardKeyboardShortcut(event) {
         || target instanceof HTMLTextAreaElement
         || target.isContentEditable;
 
-    if (isTyping || !dom.modalOverlay.hidden || (!event.ctrlKey && !event.metaKey)) {
+    if (isTyping || !currentProjectId || !isEditMode() || !dom.modalOverlay.hidden || (!event.ctrlKey && !event.metaKey)) {
         return false;
     }
 
@@ -3532,6 +3584,24 @@ function createContextSubmenu(action) {
     });
     wrapper.appendChild(panel);
 
+    const placeSubmenu = () => {
+        panel.style.top = "-6px";
+        panel.style.left = "calc(100% + 6px)";
+        panel.style.right = "auto";
+        wrapper.classList.remove("opens-left");
+        const rect = panel.getBoundingClientRect();
+        if (rect.right > window.innerWidth - 10) {
+            panel.style.left = "auto";
+            panel.style.right = "calc(100% + 6px)";
+            wrapper.classList.add("opens-left");
+        }
+        if (rect.bottom > window.innerHeight - 10) {
+            panel.style.top = `${-6 - (rect.bottom - window.innerHeight + 10)}px`;
+        }
+    };
+    wrapper.addEventListener("mouseenter", placeSubmenu);
+    wrapper.addEventListener("focusin", placeSubmenu);
+
     return wrapper;
 }
 
@@ -3554,10 +3624,8 @@ function placePositionContextMenu(clientX, clientY) {
     dom.positionContextMenu.style.left = `${Math.max(10, x)}px`;
     dom.positionContextMenu.style.top = `${Math.max(10, y)}px`;
 
-    const firstButton = dom.positionContextMenu.querySelector("button");
-    if (firstButton) {
-        firstButton.focus();
-    }
+    dom.positionContextMenu.tabIndex = -1;
+    dom.positionContextMenu.focus();
 }
 
 function hidePositionContextMenu() {
@@ -3948,62 +4016,74 @@ function getPositionRevision(setupType, positionId) {
     return position && Number.isInteger(position.revision) ? position.revision : null;
 }
 
-function applyServerPosition(position) {
-    if (!position || !SETUP_LABELS[position.setupType] || !isValidPositionId(position.positionId)) {
-        return;
-    }
-
-    const setup = getSetupByName(position.setupType);
-    setup.positions[position.positionId] = {
-        items: normalizeItems(position.items),
-        revision: Number(position.revision) || 1,
-        updatedAt: position.updatedAt || ""
-    };
+function queueProjectWrite(operation) {
+    pendingProjectWrites += 1;
+    const task = projectWriteQueue.then(operation);
+    projectWriteQueue = task.catch(() => {});
+    return task.finally(() => {
+        pendingProjectWrites -= 1;
+        if (!pendingProjectWrites) queuedPositionRevisions.clear();
+    });
 }
 
-async function persistPositionsToServer(positionIds, setupType = appState.activeSetup) {
-    if (!currentProjectId) {
-        return;
+function acknowledgeSetupWrite(projectId, setupType, setup) {
+    const prefix = `${projectId}/${setupType}/`;
+    for (const key of queuedPositionRevisions.keys()) {
+        if (key.startsWith(prefix)) queuedPositionRevisions.set(key, 0);
     }
+    for (const [positionId, position] of Object.entries(setup.positions)) {
+        queuedPositionRevisions.set(prefix + positionId, position.revision);
+        const current = projectId === currentProjectId && getSetupByName(setupType).positions[positionId];
+        if (current) current.revision = position.revision;
+    }
+}
 
+function persistPositionsToServer(positionIds, setupType = appState.activeSetup) {
+    const changes = normalizeSelectedPositionIds(positionIds).map(positionId => ({
+        positionId,
+        items: normalizeItems(getSetupByName(setupType).positions[positionId]?.items || []),
+        revision: getPositionRevision(setupType, positionId) || 0
+    }));
+    return persistPositionChanges(changes, setupType);
+}
+
+function persistDeletedPositionsToServer(positionIds, revisionMap = {}, setupType = appState.activeSetup) {
+    const changes = normalizeSelectedPositionIds(positionIds).map(positionId => ({
+        positionId, items: null, revision: revisionMap[positionId] || 0
+    }));
+    return persistPositionChanges(changes, setupType);
+}
+
+function persistPositionChanges(changes, setupType) {
+    const projectId = currentProjectId;
+    if (!projectId) return;
     recordHistorySnapshot();
     setSaveIndicator("Saving...", "saving");
-    try {
-        for (const positionId of normalizeSelectedPositionIds(positionIds)) {
-            const items = getSetupByName(setupType).positions[positionId]
-                ? normalizeItems(getSetupByName(setupType).positions[positionId].items)
-                : [];
-            const data = await storage.savePosition(currentProjectId, setupType, positionId, {
-                items,
-                revision: getPositionRevision(setupType, positionId) || 0
-            });
-            if (data && data.position) {
-                applyServerPosition(data.position);
+    return queueProjectWrite(async () => {
+        try {
+            for (const change of changes) {
+                const key = `${projectId}/${setupType}/${change.positionId}`;
+                const revision = queuedPositionRevisions.get(key) ?? change.revision;
+                if (change.items === null) {
+                    await storage.deletePosition(projectId, setupType, change.positionId, { revision });
+                    queuedPositionRevisions.set(key, 0);
+                } else {
+                    const data = await storage.savePosition(projectId, setupType, change.positionId, { items: change.items, revision });
+                    queuedPositionRevisions.set(key, data.position.revision);
+                    // A newer local edit may already be visible. Only acknowledge its revision.
+                    const current = projectId === currentProjectId && getSetupByName(setupType).positions[change.positionId];
+                    if (current) {
+                        current.revision = data.position.revision;
+                        current.updatedAt = data.position.updatedAt;
+                    }
+                }
             }
+            if (projectId === currentProjectId) setSaveIndicator("Saved", "saved");
+        } catch (error) {
+            if (projectId === currentProjectId) await handlePositionSaveError(error);
+            else showToast(getSaveErrorMessage(error));
         }
-        setSaveIndicator("Saved", "saved");
-    } catch (error) {
-        await handlePositionSaveError(error);
-    }
-}
-
-async function persistDeletedPositionsToServer(positionIds, revisionMap = {}, setupType = appState.activeSetup) {
-    if (!currentProjectId) {
-        return;
-    }
-
-    recordHistorySnapshot();
-    setSaveIndicator("Saving...", "saving");
-    try {
-        for (const positionId of normalizeSelectedPositionIds(positionIds)) {
-            await storage.deletePosition(currentProjectId, setupType, positionId, {
-                revision: revisionMap[positionId] == null ? 0 : revisionMap[positionId]
-            });
-        }
-        setSaveIndicator("Saved", "saved");
-    } catch (error) {
-        await handlePositionSaveError(error);
-    }
+    });
 }
 
 async function handlePositionSaveError(error) {
@@ -4431,7 +4511,12 @@ function openPasteSetupConfirmation() {
 }
 
 async function applySetupPaste() {
-    appState.setups[appState.activeSetup] = cloneSetup(boardClipboard.setup);
+    const projectId = currentProjectId;
+    const setupType = appState.activeSetup;
+    const setup = cloneSetup(boardClipboard.setup);
+    const payload = cloneSetup(setup);
+    appState.setups[setupType] = setup;
+    recordHistorySnapshot();
     appState.selectedPosition = null;
     editorContext = null;
     clearSelectionState();
@@ -4439,9 +4524,16 @@ async function applySetupPaste() {
     renderApp();
     setSaveIndicator("Saving...", "saving");
     try {
-        const data = await storage.replaceSetup(currentProjectId, appState.activeSetup, appState.setups[appState.activeSetup]);
-        appState.setups[appState.activeSetup] = normalizeSetup(data.setup);
-        await reloadCurrentProject();
+        const data = await queueProjectWrite(async () => {
+            const result = await storage.replaceSetup(projectId, setupType, payload);
+            acknowledgeSetupWrite(projectId, setupType, result.setup);
+            return result;
+        });
+        if (projectId !== currentProjectId) return;
+        if (!pendingProjectWrites && !editorContext) {
+            appState.setups[setupType] = normalizeSetup(data.setup);
+            await reloadCurrentProject();
+        }
         showToast("Setup pasted");
     } catch (error) {
         setSaveIndicator("Failed to save", "error");
@@ -4692,27 +4784,32 @@ function scheduleProjectSave() {
     }
 
     setSaveIndicator("Saving...", "saving");
-    window.clearTimeout(metadataSaveTimer);
-    metadataSaveTimer = window.setTimeout(flushProjectSave, 700);
+    const projectId = currentProjectId;
+    window.clearTimeout(metadataSaveTimers.get(projectId));
+    const payload = buildProjectSavePayload();
+    metadataSaveTimers.set(projectId, window.setTimeout(() => {
+        metadataSaveTimers.delete(projectId);
+        flushProjectSave(projectId, payload);
+    }, 700));
 }
 
 function flushProjectSaveNow() {
-    window.clearTimeout(metadataSaveTimer);
+    window.clearTimeout(metadataSaveTimers.get(currentProjectId));
+    metadataSaveTimers.delete(currentProjectId);
     return flushProjectSave();
 }
 
-async function flushProjectSave() {
-    if (!currentProjectId || isApplyingRemoteUpdate) {
+async function flushProjectSave(projectId = currentProjectId, payload = buildProjectSavePayload()) {
+    if (!projectId || isApplyingRemoteUpdate) {
         return;
     }
 
-    const projectId = currentProjectId;
     try {
-        const data = await storage.updateProject(projectId, buildProjectSavePayload());
+        const data = await queueProjectWrite(() => storage.updateProject(projectId, payload));
         if (String(projectId) === String(currentProjectId) && data && data.project) {
             lastProjectRevision = data.project.revision || lastProjectRevision;
         }
-        setSaveIndicator("Saved", "saved");
+        if (projectId === currentProjectId) setSaveIndicator("Saved", "saved");
     } catch (error) {
         setSaveIndicator("Failed to save", "error");
         showToast(getSaveErrorMessage(error));
@@ -4779,6 +4876,8 @@ function restoreHistorySnapshot(snapshot) {
     editorContext = null;
     clearSelectionState();
     historySnapshot = createHistorySnapshot(appState);
+    window.clearTimeout(metadataSaveTimers.get(currentProjectId));
+    metadataSaveTimers.delete(currentProjectId);
     persistFullProjectReplacement();
     renderApp();
     return true;
@@ -4790,11 +4889,20 @@ async function persistFullProjectReplacement() {
     }
 
     setSaveIndicator("Saving...", "saving");
+    const projectId = currentProjectId;
+    const payload = buildProjectSavePayload();
+    const checkpoint = cloneSetup(appState.setups.checkpoint);
+    const container = cloneSetup(appState.setups.container);
     try {
-        await storage.updateProject(currentProjectId, buildProjectSavePayload());
-        await storage.replaceSetup(currentProjectId, "checkpoint", appState.setups.checkpoint);
-        await storage.replaceSetup(currentProjectId, "container", appState.setups.container);
-        await reloadCurrentProject();
+        await queueProjectWrite(async () => {
+            await storage.updateProject(projectId, payload);
+            const first = await storage.replaceSetup(projectId, "checkpoint", checkpoint);
+            acknowledgeSetupWrite(projectId, "checkpoint", first.setup);
+            const second = await storage.replaceSetup(projectId, "container", container);
+            acknowledgeSetupWrite(projectId, "container", second.setup);
+        });
+        if (projectId !== currentProjectId) return;
+        if (!pendingProjectWrites && !editorContext) await reloadCurrentProject();
         setSaveIndicator("Saved", "saved");
     } catch (error) {
         setSaveIndicator("Failed to save", "error");
@@ -4803,6 +4911,7 @@ async function persistFullProjectReplacement() {
 }
 
 function undoLastChange() {
+    if (!currentProjectId || !isEditMode()) return;
     if (!undoStack.length) {
         showToast("Nothing to undo");
         return;
@@ -4816,6 +4925,7 @@ function undoLastChange() {
 }
 
 function redoLastChange() {
+    if (!currentProjectId || !isEditMode()) return;
     if (!redoStack.length) {
         showToast("Nothing to redo");
         return;
@@ -5329,9 +5439,18 @@ function hideTooltip() {
 }
 
 function openModal(html) {
+    window.clearTimeout(modalCloseTimer);
+    modalReturnFocus = document.activeElement;
+    hideTooltip();
+    hidePositionContextMenu();
     dom.modalContent.innerHTML = html;
     dom.modalOverlay.hidden = false;
-    requestAnimationFrame(() => dom.modalOverlay.classList.add("is-open"));
+    requestAnimationFrame(() => {
+        dom.modalOverlay.classList.add("is-open");
+        if (!dom.modalContent.contains(document.activeElement)) {
+            dom.modalContent.querySelector("input, button")?.focus();
+        }
+    });
 }
 
 function bindModalCloseButtons() {
@@ -5341,11 +5460,12 @@ function bindModalCloseButtons() {
 }
 
 function closeModal() {
-    editorContext = null;
     dom.modalOverlay.classList.remove("is-open");
-    window.setTimeout(() => {
+    window.clearTimeout(modalCloseTimer);
+    modalCloseTimer = window.setTimeout(() => {
         dom.modalOverlay.hidden = true;
         dom.modalContent.innerHTML = "";
+        if (modalReturnFocus && modalReturnFocus.isConnected) modalReturnFocus.focus();
     }, 160);
 }
 
