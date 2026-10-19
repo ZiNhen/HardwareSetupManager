@@ -175,8 +175,28 @@ const storage = {
         });
     },
 
-    loadProject(projectId) {
-        return apiRequest(`/projects/${encodeURIComponent(projectId)}`);
+    async loadProject(projectId) {
+        const [data, boxData] = await Promise.all([
+            apiRequest(`/projects/${encodeURIComponent(projectId)}`), this.loadBox(projectId)
+        ]);
+        return { ...data, project: { ...data.project, box: boxData.box } };
+    },
+
+    loadBox(projectId) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/box`);
+    },
+
+    updateBoxSettings(projectId, data) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/box/settings`, { method: "PATCH", body: data });
+    },
+
+    saveBoxConnection(projectId, setup, id, data) {
+        const path = `/projects/${encodeURIComponent(projectId)}/box/${encodeURIComponent(setup)}/connections`;
+        return apiRequest(id ? `${path}/${encodeURIComponent(id)}` : path, { method: id ? "PATCH" : "POST", body: data });
+    },
+
+    deleteBoxConnection(projectId, setup, id, revision) {
+        return apiRequest(`/projects/${encodeURIComponent(projectId)}/box/${encodeURIComponent(setup)}/connections/${encodeURIComponent(id)}`, { method: "DELETE", body: { revision } });
     },
 
     updateProject(projectId, data) {
@@ -260,6 +280,7 @@ async function initializeApp() {
     appState = createInitialState();
     historySnapshot = createHistorySnapshot(appState);
     createGrid();
+    initializeBox();
     bindEvents();
     const projectId = getProjectIdFromUrl();
     if (projectId) {
@@ -454,6 +475,12 @@ function bindEvents() {
             return;
         }
 
+        if (appState.boxEditor) {
+            appState.boxEditor = null;
+            renderBoxDetails();
+            return;
+        }
+
         if (dom.projectNameRegion.querySelector(".project-name-form")) {
             cancelProjectNameEdit();
         }
@@ -464,6 +491,11 @@ function createInitialState() {
     return {
         version: 1,
         activeSetup: "checkpoint",
+        activeLayout: "pbox",
+        box: createInitialBoxState(),
+        selectedBoxHardware: null,
+        selectedBoxNode: null,
+        boxEditor: null,
         project: {
             name: DEFAULT_PROJECT_NAME,
             harness: "",
@@ -627,6 +659,7 @@ function renderApp() {
     renderBoardClipboardControls();
     renderSetupSummary();
     renderPositionDetails();
+    renderBoxLayout();
 }
 
 async function apiRequest(path, options = {}) {
@@ -1705,19 +1738,21 @@ async function pollProjectUpdates() {
     if (!currentProjectId || isApplyingRemoteUpdate || pendingProjectWrites || metadataSaveTimers.size || !dom.modalOverlay.hidden) {
         return;
     }
-    if (dom.projectInfoForm.contains(document.activeElement) || document.querySelector(".inline-editor")) {
+    if (dom.projectInfoForm.contains(document.activeElement) || document.querySelector(".inline-editor") || appState.boxEditor || boxPendingWrites || boxHarnessTimers.size) {
         return;
     }
 
     const projectId = currentProjectId;
     try {
+        await pollBoxUpdates(projectId);
+        if (projectId !== currentProjectId) return;
         const updates = await storage.getUpdates(projectId);
         if (projectId !== currentProjectId) return;
         if (lastProjectRevision && updates.revision === lastProjectRevision) {
             return;
         }
         const data = await storage.loadProject(projectId);
-        if (editorContext || pendingProjectWrites || metadataSaveTimers.size || dom.projectInfoForm.contains(document.activeElement)) return;
+        if (editorContext || appState.boxEditor || boxPendingWrites || boxHarnessTimers.size || pendingProjectWrites || metadataSaveTimers.size || dom.projectInfoForm.contains(document.activeElement)) return;
         applyRemoteProject(data.project);
     } catch (error) {
         setSaveIndicator("Offline", "error");
@@ -1734,6 +1769,9 @@ function applyRemoteProject(projectData) {
     appState = normalizeState({
         ...projectData,
         activeSetup: appState.activeSetup,
+        activeLayout: appState.activeLayout,
+        selectedBoxHardware: appState.selectedBoxHardware,
+        selectedBoxNode: appState.selectedBoxNode,
         interactionMode: appState.interactionMode
     });
     lastProjectRevision = projectData.revision || lastProjectRevision;
@@ -1789,6 +1827,7 @@ function renderProjectInfo() {
         field.value = appState.project[key] || "";
     });
     renderCanoeAttachment();
+    renderBoxHarness();
 }
 
 function renderCanoeAttachment() {
@@ -2104,6 +2143,7 @@ function renderPosition(button, positionId, items, preset) {
 }
 
 function renderPositionDetails() {
+    if (appState.activeLayout === "box") { renderBoxDetails(); return; }
     const container = dom.positionDetailsContent;
     container.innerHTML = "";
 
@@ -3181,6 +3221,9 @@ function switchSetup(setupName) {
     hidePositionContextMenu();
     endPositionDragSelection();
     appState.activeSetup = setupName;
+    appState.boxEditor = null;
+    appState.selectedBoxHardware = null;
+    appState.selectedBoxNode = null;
     appState.selectedPosition = null;
     editorContext = null;
     clearSelectionState();
@@ -3198,6 +3241,7 @@ function switchInteractionMode(mode) {
     appState.interactionMode = mode;
     if (mode !== "edit") {
         editorContext = null;
+        appState.boxEditor = null;
         clearSelectionState();
     }
     renderInteractionMode();
@@ -3205,6 +3249,7 @@ function switchInteractionMode(mode) {
     renderProjectInfo();
     renderGrid();
     renderPositionDetails();
+    renderBoxLayout();
 }
 
 function handleSearch() {
@@ -3259,6 +3304,7 @@ function clearSelectionOnOutsideGridClick(event) {
 }
 
 function handleBoardKeyboardShortcut(event) {
+    if (appState.activeLayout === "box") return false;
     const target = event.target;
     const isTyping = target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement
@@ -4704,6 +4750,7 @@ function openUsageGuide() {
 }
 
 function validateImportedData(data) {
+    if (!validBoxImport(data?.box)) return null;
     if (!isPlainObject(data) || !isPlainObject(data.project) || !isPlainObject(data.setups)) {
         return null;
     }
@@ -4724,6 +4771,7 @@ function validateImportedData(data) {
         project: data.project,
         setups: data.setups,
         boardOptions: data.boardOptions,
+        box: data.box,
         selectedPosition: null,
         selectedPositions: [],
         selectionAnchor: null,
@@ -4832,7 +4880,9 @@ function buildProjectSavePayload() {
 }
 
 function createHistorySnapshot(state) {
-    return JSON.stringify(createExportData(state));
+    const data = createExportData(state);
+    delete data.box;
+    return JSON.stringify(data);
 }
 
 function recordHistorySnapshot() {
@@ -4965,7 +5015,8 @@ function createExportData(data) {
             checkpoint: createPortableSetup(normalized.setups.checkpoint),
             container: createPortableSetup(normalized.setups.container)
         },
-        boardOptions: normalized.boardOptions
+        boardOptions: normalized.boardOptions,
+        ...(portableBox(normalized.box) ? { box: portableBox(normalized.box) } : {})
     };
 }
 
@@ -4984,6 +5035,11 @@ function normalizeState(data) {
     const normalized = {
         version: 1,
         activeSetup: SETUP_LABELS[source.activeSetup] ? source.activeSetup : initial.activeSetup,
+        activeLayout: source.activeLayout === "box" ? "box" : "pbox",
+        box: normalizeBoxState(source.box),
+        selectedBoxHardware: source.selectedBoxHardware || null,
+        selectedBoxNode: boxNodes.has(source.selectedBoxNode) ? source.selectedBoxNode : null,
+        boxEditor: null,
         project: normalizeProject(source.project),
         setups: normalizeSetups(source.setups),
         boardOptions: normalizeBoardOptions(source.boardOptions),

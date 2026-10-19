@@ -167,6 +167,40 @@ Tailscale and Cloudflare Tunnel are deployment options, not source-code dependen
 - `PUT /api/projects/:projectId/setups/:setupType/positions/:positionId`
 - `DELETE /api/projects/:projectId/setups/:setupType/positions/:positionId`
 
+## Box Layout
+
+Hardware Layout contains P-Box and Box views. Checkpoint and Container each have
+independent Box mappings. In Edit mode, Add Hardware creates a mapping between
+two fixed sockets; selecting a hardware chip highlights its endpoints and roles.
+View mode and layout/selection changes do not write data.
+
+P-Box Harness still uses the existing `projects.harness` field. Box Harness and
+Box mappings use only the new `box_project_settings` and `box_connections` tables.
+The first start against an existing DB creates a timestamped
+`backups/hardware-setup-before-box-*.db` with SQLite `VACUUM INTO` before adding
+these tables. This includes committed WAL data; backup failure stops startup.
+Existing project, folder and position rows are not migrated or converted.
+
+The fixed template is `box-template.js`, not database content. Group-qualified
+socket IDs distinguish the two B33 labels; the special pair retains the visible
+label `A48/B58/B6`. A10 uses blue as specified in the canonical mapping.
+JSON exports add an optional `box` section only when Box data exists. Legacy JSON
+continues to work. Box updates/deletes and harness updates require their current
+revision; stale updates return HTTP 409 without overwriting newer data.
+
+Additional API routes:
+
+- `GET /api/projects/:projectId/box`
+- `PATCH /api/projects/:projectId/box/settings`
+- `POST /api/projects/:projectId/box/:setupType/connections`
+- `PATCH /api/projects/:projectId/box/:setupType/connections/:connectionId`
+- `DELETE /api/projects/:projectId/box/:setupType/connections/:connectionId`
+
+Regression checks use temporary databases only:
+`node scripts/box-db-regression.cjs` and `node scripts/ui-regression.cjs`.
+The browser check needs Playwright and Edge in the test environment, not on the
+application server. No runtime dependencies were added.
+
 ## Current Limits
 
 - No authentication yet.

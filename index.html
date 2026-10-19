@@ -145,8 +145,12 @@
                         <input type="text" data-project-field="partNumber" autocomplete="off">
                     </label>
                     <label class="field">
-                        <span>Harness</span>
+                        <span>P-Box Harness</span>
                         <input type="text" data-project-field="harness" autocomplete="off">
+                    </label>
+                    <label class="field">
+                        <span>Box Harness</span>
+                        <input type="text" id="boxHarnessInput" autocomplete="off">
                     </label>
                     <label class="field">
                         <span>Calibration ID</span>
@@ -166,7 +170,11 @@
             <section class="panel map-panel" aria-labelledby="hardwareMapTitle">
                 <div class="panel-header map-panel-header">
                     <div>
-                        <h2 id="hardwareMapTitle">Hardware Map</h2>
+                        <h2 id="hardwareMapTitle">Hardware Layout</h2>
+                        <div class="mini-segmented-control layout-tabs" role="tablist" aria-label="Hardware layout">
+                            <button class="mini-segment-button is-active" type="button" role="tab" aria-selected="true" data-layout-tab="pbox">P-Box</button>
+                            <button class="mini-segment-button" type="button" role="tab" aria-selected="false" data-layout-tab="box">Box</button>
+                        </div>
                         <p class="map-hint" id="mapHint">View mode: click a position to view details</p>
                     </div>
                     <div class="map-tools">
@@ -191,6 +199,13 @@
                     </div>
                 </div>
                 <div class="search-status" id="searchStatus" aria-live="polite"></div>
+                <div id="boxView" class="box-view" hidden>
+                    <div class="box-toolbar">
+                        <div id="boxChips" class="box-chips" aria-label="Mapped Box hardware"></div>
+                        <button id="addBoxHardwareButton" class="mini-action-button" type="button" hidden>Add Hardware</button>
+                    </div>
+                    <div class="box-board-scroll"><div id="boxBoard" class="box-board"></div></div>
+                </div>
                 <div class="map-scroll" id="mapScroll" tabindex="0" aria-label="Scrollable hardware map">
                     <div class="hardware-grid" id="hardwareGrid" aria-label="22 row by 5 column hardware map"></div>
                 </div>
@@ -219,6 +234,8 @@
     <div class="hardware-tooltip" id="hardwareTooltip" role="tooltip" hidden></div>
     <div class="context-menu" id="positionContextMenu" role="menu" hidden></div>
 
+    <script src="box-template.js"></script>
+    <script src="box.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

@@ -3,6 +3,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
+const BOX_TEMPLATE = require("./box-template");
+const BOX_NODE_IDS = new Set(BOX_TEMPLATE.nodes.map(node => node.id));
 
 const DATA_DIR = path.join(__dirname, "data");
 const DB_PATH = path.join(DATA_DIR, "hardware-setup.db");
@@ -20,7 +22,22 @@ function openDatabase() {
     }
 
     fs.mkdirSync(DATA_DIR, { recursive: true });
+    const existingDatabase = fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0;
     db = new DatabaseSync(DB_PATH);
+    // VACUUM INTO creates a transactionally consistent snapshot, including committed WAL data.
+    // Fail startup before schema changes if the required backup cannot be created.
+    if (existingDatabase && db.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('box_project_settings', 'box_connections')").get().count !== 2) {
+        try {
+            const backupDir = path.join(__dirname, "backups");
+            fs.mkdirSync(backupDir, { recursive: true });
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            db.prepare("VACUUM INTO ?").run(path.join(backupDir, `hardware-setup-before-box-${stamp}-${process.pid}.db`));
+        } catch (error) {
+            db.close();
+            db = null;
+            throw error;
+        }
+    }
     db.exec(`
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
@@ -78,7 +95,134 @@ function openDatabase() {
     migrateDatabase(db);
     db.exec("CREATE INDEX IF NOT EXISTS idx_projects_folder_id ON projects(folder_id);");
     db.exec("CREATE INDEX IF NOT EXISTS idx_folders_parent_id ON folders(parent_id);");
+    initializeBoxSchema(db);
     return db;
+}
+
+function initializeBoxSchema(database) {
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS box_project_settings (
+            project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            harness TEXT NOT NULL DEFAULT '',
+            revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS box_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            setup_type TEXT NOT NULL CHECK (setup_type IN ('checkpoint', 'container')),
+            type TEXT NOT NULL CHECK (type IN ('sensor', 'aod', 'physicalSwitch', 'mechanicalSwitch')),
+            name TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            node1 TEXT NOT NULL,
+            role1 TEXT NOT NULL DEFAULT '',
+            node2 TEXT NOT NULL,
+            role2 TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            revision INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL,
+            CHECK (node1 <> node2)
+        );
+        CREATE INDEX IF NOT EXISTS idx_box_connections_project_setup ON box_connections(project_id, setup_type);
+    `);
+}
+
+function boxError(message, status = 400) {
+    return Object.assign(new Error(message), { status });
+}
+
+function normalizeBoxConnection(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw boxError("Invalid Box mapping");
+    const item = Object.fromEntries(["type", "name", "displayName", "node1", "role1", "node2", "role2", "notes"]
+        .map(key => [key, cleanString(value[key])]));
+    if (!BOX_TEMPLATE.types.includes(item.type) || !item.name || !item.displayName) throw boxError("Type, hardware name and display name are required");
+    if (!BOX_NODE_IDS.has(item.node1) || !BOX_NODE_IDS.has(item.node2) || item.node1 === item.node2) throw boxError("Choose two different Box sockets");
+    return item;
+}
+
+function normalizeBoxImport(value) {
+    if (value === undefined) return null;
+    if (!value || typeof value !== "object" || !value.setups) throw boxError("Invalid Box data");
+    const setups = {};
+    for (const setup of SETUP_TYPES) {
+        const connections = value.setups[setup]?.connections;
+        if (!Array.isArray(connections)) throw boxError("Invalid Box connections");
+        setups[setup] = connections.map(normalizeBoxConnection);
+    }
+    return { harness: cleanString(value.harness ?? value.settings?.harness), setups };
+}
+
+function rowToBoxConnection(row) {
+    return { id: row.id, type: row.type, name: row.name, displayName: row.display_name,
+        node1: row.node1, role1: row.role1, node2: row.node2, role2: row.role2,
+        notes: row.notes, revision: row.revision, updatedAt: row.updated_at };
+}
+
+function getBox(projectId) {
+    const project = requireProject(projectId);
+    const settings = openDatabase().prepare("SELECT * FROM box_project_settings WHERE project_id = ?").get(project.id);
+    const rows = openDatabase().prepare("SELECT * FROM box_connections WHERE project_id = ? ORDER BY id").all(project.id);
+    return {
+        settings: { harness: settings?.harness || "", revision: settings?.revision || 0 },
+        setups: Object.fromEntries([...SETUP_TYPES].map(setup => [setup, { connections: rows.filter(row => row.setup_type === setup).map(rowToBoxConnection) }])),
+        revision: JSON.stringify([settings?.revision || 0, ...rows.map(row => [row.id, row.revision])])
+    };
+}
+
+function assertBoxRevision(payload, current) {
+    if (!Number.isInteger(payload?.revision) || payload.revision !== current) throw boxError("Box data changed on another device. Reload and try again.", 409);
+}
+
+function updateBoxSettings(projectId, payload) {
+    const project = requireProject(projectId);
+    return runTransaction(database => {
+        const row = database.prepare("SELECT revision FROM box_project_settings WHERE project_id = ?").get(project.id);
+        assertBoxRevision(payload, row?.revision || 0);
+        database.prepare(`INSERT INTO box_project_settings (project_id, harness, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET harness = excluded.harness, revision = revision + 1, updated_at = excluded.updated_at`)
+            .run(project.id, cleanString(payload.harness), nowSql());
+        return getBox(project.id);
+    });
+}
+
+function insertBoxConnection(database, projectId, setup, item) {
+    return database.prepare(`INSERT INTO box_connections
+        (project_id, setup_type, type, name, display_name, node1, role1, node2, role2, notes, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(projectId, setup, item.type, item.name, item.displayName, item.node1, item.role1, item.node2, item.role2, item.notes, nowSql());
+}
+
+function saveBoxConnection(projectId, setupType, connectionId, payload) {
+    const project = requireProject(projectId);
+    const setup = assertSetupType(setupType);
+    const item = normalizeBoxConnection(payload);
+    return runTransaction(database => {
+        if (connectionId === null) {
+            insertBoxConnection(database, project.id, setup, item);
+        } else {
+            const row = database.prepare("SELECT * FROM box_connections WHERE id = ? AND project_id = ? AND setup_type = ?")
+                .get(assertProjectId(connectionId), project.id, setup);
+            if (!row) throw boxError("Box mapping not found", 404);
+            assertBoxRevision(payload, row.revision);
+            database.prepare(`UPDATE box_connections SET type = ?, name = ?, display_name = ?, node1 = ?, role1 = ?, node2 = ?, role2 = ?,
+                notes = ?, revision = revision + 1, updated_at = ? WHERE id = ?`)
+                .run(item.type, item.name, item.displayName, item.node1, item.role1, item.node2, item.role2, item.notes, nowSql(), row.id);
+        }
+        return getBox(project.id);
+    });
+}
+
+function deleteBoxConnection(projectId, setupType, connectionId, payload) {
+    const project = requireProject(projectId);
+    const setup = assertSetupType(setupType);
+    return runTransaction(database => {
+        const row = database.prepare("SELECT * FROM box_connections WHERE id = ? AND project_id = ? AND setup_type = ?")
+            .get(assertProjectId(connectionId), project.id, setup);
+        if (!row) throw boxError("Box mapping not found", 404);
+        assertBoxRevision(payload, row.revision);
+        database.prepare("DELETE FROM box_connections WHERE id = ?").run(row.id);
+        return getBox(project.id);
+    });
 }
 
 function migrateDatabase(database) {
@@ -526,6 +670,7 @@ function touchProject(projectId) {
 }
 
 function createProject(payload = {}) {
+    const box = normalizeBoxImport(payload.box);
     const project = normalizeProject(payload.project || payload);
     const folderId = requireFolder(payload.folderId);
     const boardOptions = normalizeBoardOptions(payload.boardOptions);
@@ -582,6 +727,12 @@ function createProject(payload = {}) {
             });
         });
 
+        if (box) {
+            if (box.harness) database.prepare("INSERT INTO box_project_settings (project_id, harness, updated_at) VALUES (?, ?, ?)").run(projectId, box.harness, nowSql());
+            for (const setup of SETUP_TYPES) {
+                box.setups[setup].forEach(item => insertBoxConnection(database, projectId, setup, item));
+            }
+        }
         touchProject(projectId);
         return projectId;
     });
@@ -783,6 +934,10 @@ function rowToPosition(row) {
 }
 
 module.exports = {
+    getBox,
+    updateBoxSettings,
+    saveBoxConnection,
+    deleteBoxConnection,
     DB_PATH,
     openDatabase,
     listFolders,

@@ -212,6 +212,31 @@ async function handleApiRequest(request, response, pathname) {
         return;
     }
 
+    params = matchRoute(pathname, "/api/projects/:projectId/box");
+    if (params && method === "GET") {
+        sendJson(response, { box: db.getBox(params.projectId) });
+        return;
+    }
+    params = matchRoute(pathname, "/api/projects/:projectId/box/settings");
+    if (params && method === "PATCH") {
+        sendJson(response, { box: db.updateBoxSettings(params.projectId, await readRequestBody(request)) });
+        return;
+    }
+    params = matchRoute(pathname, "/api/projects/:projectId/box/:setupType/connections");
+    if (params && method === "POST") {
+        sendJson(response, { box: db.saveBoxConnection(params.projectId, params.setupType, null, await readRequestBody(request)) }, 201);
+        return;
+    }
+    params = matchRoute(pathname, "/api/projects/:projectId/box/:setupType/connections/:connectionId");
+    if (params && method === "PATCH") {
+        sendJson(response, { box: db.saveBoxConnection(params.projectId, params.setupType, params.connectionId, await readRequestBody(request)) });
+        return;
+    }
+    if (params && method === "DELETE") {
+        sendJson(response, { box: db.deleteBoxConnection(params.projectId, params.setupType, params.connectionId, await readRequestBody(request)) });
+        return;
+    }
+
     params = matchRoute(pathname, "/api/projects/:projectId/updates");
     if (params && method === "GET") {
         sendJson(response, db.getUpdates(params.projectId));
@@ -284,7 +309,9 @@ function handleStaticRequest(request, response, pathname) {
         ["/", "index.html"],
         ["/index.html", "index.html"],
         ["/style.css", "style.css"],
-        ["/script.js", "script.js"]
+        ["/script.js", "script.js"],
+        ["/box-template.js", "box-template.js"],
+        ["/box.js", "box.js"]
     ]);
 
     sendFile(response, staticFiles.get(pathname) || "index.html");

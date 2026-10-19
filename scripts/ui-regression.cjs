@@ -10,7 +10,7 @@ const { chromium } = require('playwright');
 async function main() {
     const root = path.resolve(__dirname, '..');
     const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'hardware-ui-'));
-    for (const file of ['server.js', 'db.js', 'index.html', 'script.js', 'style.css']) {
+    for (const file of ['server.js', 'db.js', 'index.html', 'script.js', 'style.css', 'box-template.js', 'box.js']) {
         fs.copyFileSync(path.join(root, file), path.join(sandbox, file));
     }
     const net = require('node:net');
@@ -324,6 +324,7 @@ async function main() {
             await page.locator('#importFileInput').setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{bad') });
             await page.waitForTimeout(250); assert.equal(writes.length, before);
         });
+        await require('./box-regression.cjs')({ page, api, check, base, sandbox, writes, child });
         await check('no browser console errors', async () => assert.deepEqual(errors, []));
         console.log('Screenshots and isolated test DB: ' + sandbox);
         assert.deepEqual(failures, [], 'Failed checks');
