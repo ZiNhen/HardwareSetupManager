@@ -173,6 +173,10 @@ Hardware Layout contains P-Box and Box views. Checkpoint and Container each have
 independent Box mappings. In Edit mode, Add Hardware creates a mapping between
 two fixed sockets; selecting a hardware chip highlights its endpoints and roles.
 View mode and layout/selection changes do not write data.
+The Hardware Connections table follows the active setup. Select a row or chip
+to view the same mapping; Edit/Delete actions appear only in Edit mode.
+New Sensor mappings start with endpoint roles `+` and `-`, which remain editable.
+Existing mappings and custom roles are unchanged.
 
 P-Box Harness still uses the existing `projects.harness` field. Box Harness and
 Box mappings use only the new `box_project_settings` and `box_connections` tables.
@@ -183,7 +187,7 @@ Existing project, folder and position rows are not migrated or converted.
 
 The fixed template is `box-template.js`, not database content. Group-qualified
 socket IDs distinguish the two B33 labels; the special pair retains the visible
-label `A48/B58/B6`. A10 uses blue as specified in the canonical mapping.
+label `A48/B58/B6`. Group 2 B19 is white and A10 is black, matching the final photo.
 JSON exports add an optional `box` section only when Box data exists. Legacy JSON
 continues to work. Box updates/deletes and harness updates require their current
 revision; stale updates return HTTP 409 without overwriting newer data.

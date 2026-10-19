@@ -47,7 +47,8 @@ function initializeBox() {
     boxDom = {
         view: document.getElementById("boxView"), board: document.getElementById("boxBoard"),
         chips: document.getElementById("boxChips"), add: document.getElementById("addBoxHardwareButton"),
-        harness: document.getElementById("boxHarnessInput"), tabs: [...document.querySelectorAll("[data-layout-tab]")]
+        harness: document.getElementById("boxHarnessInput"), tabs: [...document.querySelectorAll("[data-layout-tab]")],
+        table: document.getElementById("boxConnectionsTable"), tableTitle: document.getElementById("boxConnectionsTitle")
     };
     boxDom.tabs.forEach(button => button.addEventListener("click", () => switchHardwareLayout(button.dataset.layoutTab)));
     boxDom.add.addEventListener("click", () => openBoxEditor());
@@ -171,7 +172,53 @@ function renderBoxLayout() {
         const role = endpoint ? selected[`role${endpoint}`] || String(endpoint) : "";
         badge.querySelector("text").textContent = role.length > 5 ? role.slice(0, 4) + "..." : role;
     });
+    renderBoxConnections();
     renderBoxDetails();
+}
+
+function renderBoxConnections() {
+    const focusedRow = document.activeElement?.dataset.boxRow;
+    boxDom.tableTitle.textContent = `Hardware Connections (${SETUP_LABELS[appState.activeSetup]} - Box)`;
+    const editable = isEditMode();
+    boxDom.table.innerHTML = `<thead><tr><th scope="col">#</th><th scope="col">Hardware / Display Name</th><th scope="col">Type</th>
+        <th scope="col">Endpoint 1 + Role</th><th scope="col">Endpoint 2 + Role</th><th scope="col">Notes</th>
+        ${editable ? '<th scope="col" class="box-actions-heading">Actions</th>' : ''}</tr></thead>`;
+    const body = boxDom.table.createTBody();
+    boxConnections().forEach((item, index) => {
+        const row = body.insertRow();
+        row.dataset.boxRow = String(item.id);
+        row.tabIndex = 0;
+        row.classList.toggle("is-selected", item.id === appState.selectedBoxHardware);
+        row.setAttribute("aria-current", String(item.id === appState.selectedBoxHardware));
+        row.innerHTML = `<td>${index + 1}</td><td><strong>${escapeHtml(item.displayName)}</strong><span>${escapeHtml(item.name)}</span></td>
+            <td>${escapeHtml(getTypeLabel(item.type))}</td><td>${escapeHtml(boxEndpointLabel(item.node1, item.role1))}</td>
+            <td>${escapeHtml(boxEndpointLabel(item.node2, item.role2))}</td><td>${escapeHtml(item.notes || "-")}</td>`;
+        row.addEventListener("click", () => selectBoxHardware(item.id));
+        row.addEventListener("keydown", event => {
+            if (event.target === row && ["Enter", " "].includes(event.key)) {
+                event.preventDefault();
+                selectBoxHardware(item.id);
+            }
+        });
+        if (editable) {
+            const actions = row.insertCell();
+            [["Edit", () => openBoxEditor(item)], ["Delete", () => requestDeleteBoxHardware(item)]].forEach(([label, handler]) => {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "box-table-action";
+                button.textContent = label;
+                button.setAttribute("aria-label", `${label} ${item.displayName}`);
+                button.addEventListener("click", event => { event.stopPropagation(); handler(); });
+                actions.appendChild(button);
+            });
+        }
+    });
+    if (!body.rows.length) {
+        const cell = body.insertRow().insertCell();
+        cell.colSpan = editable ? 7 : 6;
+        cell.textContent = "No hardware connections";
+    }
+    if (focusedRow) [...body.rows].find(row => row.dataset.boxRow === focusedRow)?.focus({ preventScroll: true });
 }
 
 function selectBoxHardware(id) {
@@ -247,7 +294,7 @@ function openBoxEditor(item = null) {
 }
 
 function renderBoxEditor(container) {
-    const item = appState.boxEditor.item || {};
+    const item = appState.boxEditor.item || { type: "sensor", role1: "+", role2: "-" };
     const options = selected => `<option value="">Select socket</option>` + BOX_TEMPLATE.nodes.map(node =>
         `<option value="${node.id}"${node.id === selected ? " selected" : ""}>${escapeHtml(node.label)} (${node.group}, ${BOX_TEMPLATE.colors[node.color]})</option>`).join("");
     const field = (label, key, id = key) => `<label class="modal-field"><span class="form-label">${label}</span><input id="${id}" name="${key}" value="${escapeAttribute(item[key] || "")}" ${["name", "displayName"].includes(key) ? "required" : ""}></label>`;
@@ -264,7 +311,17 @@ function renderBoxEditor(container) {
         <div class="inline-editor-footer"><button type="button" class="secondary-button" id="cancelBoxEditor">Cancel</button><button type="submit" class="action-button primary">Save</button></div>
         </form>`;
     document.getElementById("cancelBoxEditor").addEventListener("click", () => { appState.boxEditor = null; renderBoxDetails(); });
-    document.getElementById("boxEditorForm").addEventListener("submit", saveBoxHardware);
+    const form = document.getElementById("boxEditorForm");
+    if (!appState.boxEditor.item) {
+        const editedRoles = new Set();
+        ["role1", "role2"].forEach(key => form.elements[key].addEventListener("input", () => editedRoles.add(key)));
+        form.elements.type.addEventListener("change", () => {
+            ["role1", "role2"].forEach((key, index) => {
+                if (!editedRoles.has(key)) form.elements[key].value = form.elements.type.value === "sensor" ? ["+", "-"][index] : "";
+            });
+        });
+    }
+    form.addEventListener("submit", saveBoxHardware);
 }
 
 async function saveBoxHardware(event) {
