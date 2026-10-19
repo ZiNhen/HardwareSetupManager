@@ -476,8 +476,8 @@ function bindEvents() {
         }
 
         if (appState.boxEditor) {
-            appState.boxEditor = null;
-            renderBoxDetails();
+            if (appState.boxEditor.pickTarget) cancelBoxEndpointPick();
+            else closeBoxEditor();
             return;
         }
 
@@ -3521,6 +3521,10 @@ function createSetPositionSubmenuAction(preset, targetIds, items) {
     };
 }
 
+function createSensorPreset(displayName) {
+    return { type: "sensor", name: displayName, displayName, notes: "" };
+}
+
 function addSensorOptionToPositions(positionIds, displayName) {
     const ids = normalizeSelectedPositionIds(positionIds);
     if (!ids.length) {
@@ -3534,12 +3538,7 @@ function addSensorOptionToPositions(positionIds, displayName) {
         const existing = positions[positionId] && Array.isArray(positions[positionId].items)
             ? normalizeItems(positions[positionId].items)
             : [];
-        const sensorItem = {
-            type: "sensor",
-            name: displayName,
-            displayName,
-            notes: ""
-        };
+        const sensorItem = createSensorPreset(displayName);
 
         positions[positionId] = {
             items: existing.length && existing.every((item) => item.type === "sensor")

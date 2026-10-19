@@ -10,11 +10,15 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
     const setup = name => page.locator(`[data-setup-tab="${name}"]`).click();
     const mode = name => page.locator(`[data-interaction-mode="${name}"]`).click();
     const load = async () => { await page.goto(`${base}/?project=${id}`); await page.locator('.workspace').waitFor({ state: 'visible' }); };
+    const chooseFromList = async (name, value) => {
+        if (!await page.locator('.box-endpoint-fallback').evaluate(element => element.open)) await page.locator('.box-endpoint-fallback summary').click();
+        await page.locator(`#boxEditorForm [name="${name}"]`).selectOption(value);
+    };
     const fill = async (name, node1, node2) => {
         await page.locator('#boxName').fill(name + ' hardware');
         await page.locator('#boxDisplayName').fill(name);
-        await page.locator('#boxEditorForm [name="node1"]').selectOption(node1);
-        await page.locator('#boxEditorForm [name="node2"]').selectOption(node2);
+        await chooseFromList('node1', node1);
+        await chooseFromList('node2', node2);
     };
     const save = async () => {
         await page.locator('#boxEditorForm button[type="submit"]').click();
@@ -85,7 +89,7 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         await page.locator('#boxEditorForm button[type="submit"]').click();
         assert.match(await page.locator('#boxFormError').innerText(), /different/);
         assert.equal(writes.length, before);
-        await page.locator('#boxEditorForm [name="node2"]').selectOption('G2-A10'); await save();
+        await chooseFromList('node2', 'G2-A10'); await save();
         first = (await api(boxPath, undefined, 'GET')).box.setups.checkpoint.connections[0];
         assert.equal(first.role1, '+'); assert.equal(first.role2, '-');
         const socket = page.locator('[data-box-node="G2-A10"] .box-socket');

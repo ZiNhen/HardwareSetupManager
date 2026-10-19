@@ -48,7 +48,8 @@ function initializeBox() {
         view: document.getElementById("boxView"), board: document.getElementById("boxBoard"),
         chips: document.getElementById("boxChips"), add: document.getElementById("addBoxHardwareButton"),
         harness: document.getElementById("boxHarnessInput"), tabs: [...document.querySelectorAll("[data-layout-tab]")],
-        table: document.getElementById("boxConnectionsTable"), tableTitle: document.getElementById("boxConnectionsTitle")
+        table: document.getElementById("boxConnectionsTable"), tableTitle: document.getElementById("boxConnectionsTitle"),
+        pickStatus: document.getElementById("boxPickStatus")
     };
     boxDom.tabs.forEach(button => button.addEventListener("click", () => switchHardwareLayout(button.dataset.layoutTab)));
     boxDom.add.addEventListener("click", () => openBoxEditor());
@@ -160,20 +161,32 @@ function renderBoxLayout() {
     all.addEventListener("click", () => selectBoxHardware(null));
     boxDom.chips.appendChild(all);
     if (focusedChip) [...boxDom.chips.children].find(button => button.dataset.boxHardware === focusedChip)?.focus();
-    const selected = selectedBoxConnection();
+    renderBoxNodes();
+    renderBoxConnections();
+    renderBoxDetails();
+}
+
+function renderBoxNodes() {
+    const editor = appState.boxEditor;
+    const selected = editor ? editor.draft : selectedBoxConnection();
+    const pickTarget = editor?.pickTarget;
+    boxDom.pickStatus.hidden = !pickTarget;
+    boxDom.pickStatus.textContent = pickTarget ? `Selecting ${boxDraftEndpointLabel(pickTarget)} - click a Box socket` : "";
+    boxDom.board.classList.toggle("is-picking", Boolean(pickTarget));
+    boxDom.board.classList.toggle("is-editing", Boolean(editor));
     boxDom.board.querySelectorAll("[data-box-node]").forEach(element => {
         const id = element.dataset.boxNode;
         const endpoint = selected?.node1 === id ? 1 : selected?.node2 === id ? 2 : 0;
-        element.classList.toggle("is-highlighted", Boolean(endpoint) || appState.selectedBoxNode === id);
-        element.classList.toggle("is-dimmed", Boolean(selected) && !endpoint);
-        element.setAttribute("aria-pressed", String(Boolean(endpoint) || appState.selectedBoxNode === id));
+        const highlighted = Boolean(endpoint) || (!editor && appState.selectedBoxNode === id);
+        element.classList.toggle("is-highlighted", highlighted);
+        element.classList.toggle("is-pick-target", Boolean(pickTarget) && selected[pickTarget] === id);
+        element.classList.toggle("is-dimmed", Boolean(selected?.node1 || selected?.node2) && !endpoint);
+        element.setAttribute("aria-pressed", String(highlighted));
         const badge = element.querySelector(".box-role");
         badge.toggleAttribute("hidden", !endpoint);
         const role = endpoint ? selected[`role${endpoint}`] || String(endpoint) : "";
         badge.querySelector("text").textContent = role.length > 5 ? role.slice(0, 4) + "..." : role;
     });
-    renderBoxConnections();
-    renderBoxDetails();
 }
 
 function renderBoxConnections() {
@@ -230,6 +243,10 @@ function selectBoxHardware(id) {
 }
 
 function selectBoxNode(id) {
+    if (appState.boxEditor) {
+        if (appState.boxEditor.pickTarget && !boxPendingWrites) assignBoxDraftEndpoint(appState.boxEditor.pickTarget, id);
+        return;
+    }
     const matches = boxConnections().filter(item => item.node1 === id || item.node2 === id);
     if (matches.length === 1) { selectBoxHardware(matches[0].id); return; }
     appState.selectedBoxNode = id;
@@ -288,39 +305,148 @@ function renderBoxDetails() {
 
 function openBoxEditor(item = null) {
     if (!isEditMode() || boxPendingWrites) return;
-    appState.boxEditor = { projectId: currentProjectId, setup: appState.activeSetup, item: item ? { ...item } : null };
+    appState.boxEditor = {
+        projectId: currentProjectId, setup: appState.activeSetup, item: item ? { ...item } : null,
+        draft: item ? { ...item } : { type: "sensor", name: "", displayName: "", node1: "", node2: "", role1: "+", role2: "-", notes: "" },
+        pickTarget: null, editedRoles: [], error: ""
+    };
+    renderBoxNodes();
     renderBoxDetails();
     document.getElementById("boxName").focus();
 }
 
+function closeBoxEditor() {
+    appState.boxEditor = null;
+    hideTooltip();
+    renderBoxLayout();
+}
+
+function boxDraftEndpointLabel(target) {
+    const draft = appState.boxEditor.draft;
+    const role = draft[target === "node1" ? "role1" : "role2"];
+    if (draft.type === "sensor" && role === "+") return "Positive (+)";
+    if (draft.type === "sensor" && role === "-") return "Negative (-)";
+    return `Endpoint ${target === "node1" ? "1" : "2"}${role ? ` (${role})` : ""}`;
+}
+
+function updateBoxEditorControls() {
+    const editor = appState.boxEditor;
+    const form = document.getElementById("boxEditorForm");
+    if (!editor || !form) return;
+    document.getElementById("boxSensorPresetField").hidden = editor.draft.type !== "sensor";
+    document.getElementById("boxFormError").textContent = editor.error;
+    for (const target of ["node1", "node2"]) {
+        const region = form.querySelector(`[data-box-endpoint="${target}"]`);
+        region.classList.toggle("is-picking", editor.pickTarget === target);
+        region.querySelector(".box-endpoint-label").textContent = boxDraftEndpointLabel(target);
+        region.querySelector(".box-endpoint-value").textContent = boxEndpointLabel(editor.draft[target], "") || "Not selected";
+        const button = region.querySelector("button");
+        button.textContent = editor.pickTarget === target ? "Selecting..." : editor.draft[target] ? "Change" : "Select on Box";
+        button.setAttribute("aria-label", `${editor.draft[target] ? "Change" : "Select"} ${boxDraftEndpointLabel(target)} on Box`);
+        button.setAttribute("aria-pressed", String(editor.pickTarget === target));
+    }
+    renderBoxNodes();
+}
+
+function startBoxEndpointPick(target) {
+    const editor = appState.boxEditor;
+    if (!editor || !isEditMode() || boxPendingWrites || !["node1", "node2"].includes(target)) return;
+    editor.pickTarget = target;
+    editor.error = "";
+    updateBoxEditorControls();
+    const id = editor.draft[target] || BOX_TEMPLATE.nodes[0].id;
+    const node = boxDom.board.querySelector(`[data-box-node="${id}"]`);
+    node.focus({ preventScroll: true });
+    node.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function cancelBoxEndpointPick() {
+    const target = appState.boxEditor.pickTarget;
+    appState.boxEditor.pickTarget = null;
+    appState.boxEditor.error = "";
+    hideTooltip();
+    updateBoxEditorControls();
+    document.querySelector(`[data-box-pick="${target}"]`)?.focus();
+}
+
+function assignBoxDraftEndpoint(target, id) {
+    const editor = appState.boxEditor;
+    if (!editor || !isEditMode() || boxPendingWrites) return;
+    if (!boxNodes.has(id) || editor.draft[target === "node1" ? "node2" : "node1"] === id) {
+        editor.error = "Choose two different Box sockets.";
+        updateBoxEditorControls();
+        return;
+    }
+    editor.draft[target] = id;
+    editor.pickTarget = null;
+    editor.error = "";
+    hideTooltip();
+    renderBoxDetails();
+    document.querySelector(`[data-box-pick="${target}"]`).focus();
+}
+
 function renderBoxEditor(container) {
-    const item = appState.boxEditor.item || { type: "sensor", role1: "+", role2: "-" };
+    const editor = appState.boxEditor;
+    const item = editor.draft;
     const options = selected => `<option value="">Select socket</option>` + BOX_TEMPLATE.nodes.map(node =>
         `<option value="${node.id}"${node.id === selected ? " selected" : ""}>${escapeHtml(node.label)} (${node.group}, ${BOX_TEMPLATE.colors[node.color]})</option>`).join("");
     const field = (label, key, id = key) => `<label class="modal-field"><span class="form-label">${label}</span><input id="${id}" name="${key}" value="${escapeAttribute(item[key] || "")}" ${["name", "displayName"].includes(key) ? "required" : ""}></label>`;
     container.innerHTML = `<form class="inline-editor-form box-editor" id="boxEditorForm">
         <h3>${item.id ? "Edit" : "Add"} Hardware</h3>
         <label class="modal-field"><span class="form-label">Hardware Type</span><select name="type">${BOX_TEMPLATE.types.map(type => `<option value="${type}"${type === item.type ? " selected" : ""}>${getTypeLabel(type)}</option>`).join("")}</select></label>
+        <label class="modal-field" id="boxSensorPresetField"><span class="form-label">Sensor Preset</span><select id="boxSensorPreset"><option value="">Custom</option>${SENSOR_CONTEXT_OPTIONS.map(preset => `<option value="${escapeAttribute(preset)}"${item.name === preset && item.displayName === preset ? " selected" : ""}>${escapeHtml(preset)}</option>`).join("")}</select></label>
         ${field("Hardware Name", "name", "boxName")}${field("Display Name", "displayName", "boxDisplayName")}
-        <label class="modal-field"><span class="form-label">Endpoint 1</span><select name="node1" required>${options(item.node1)}</select></label>
+        <div class="box-endpoint" data-box-endpoint="node1"><div><span class="box-endpoint-label"></span><strong class="box-endpoint-value"></strong></div><button type="button" class="mini-action-button" data-box-pick="node1"></button></div>
         ${field("Endpoint 1 Role", "role1")}
-        <label class="modal-field"><span class="form-label">Endpoint 2</span><select name="node2" required>${options(item.node2)}</select></label>
+        <div class="box-endpoint" data-box-endpoint="node2"><div><span class="box-endpoint-label"></span><strong class="box-endpoint-value"></strong></div><button type="button" class="mini-action-button" data-box-pick="node2"></button></div>
         ${field("Endpoint 2 Role", "role2")}
+        <details class="box-endpoint-fallback"><summary>Choose from list</summary>
+            <label class="modal-field"><span class="form-label">Endpoint 1</span><select name="node1">${options(item.node1)}</select></label>
+            <label class="modal-field"><span class="form-label">Endpoint 2</span><select name="node2">${options(item.node2)}</select></label></details>
         <label class="modal-field"><span class="form-label">Notes</span><textarea name="notes" rows="3">${escapeHtml(item.notes || "")}</textarea></label>
         <div class="form-error" role="alert" id="boxFormError"></div>
         <div class="inline-editor-footer"><button type="button" class="secondary-button" id="cancelBoxEditor">Cancel</button><button type="submit" class="action-button primary">Save</button></div>
         </form>`;
-    document.getElementById("cancelBoxEditor").addEventListener("click", () => { appState.boxEditor = null; renderBoxDetails(); });
+    document.getElementById("cancelBoxEditor").addEventListener("click", closeBoxEditor);
     const form = document.getElementById("boxEditorForm");
-    if (!appState.boxEditor.item) {
-        const editedRoles = new Set();
-        ["role1", "role2"].forEach(key => form.elements[key].addEventListener("input", () => editedRoles.add(key)));
-        form.elements.type.addEventListener("change", () => {
+    form.addEventListener("input", event => {
+        const key = event.target.name;
+        if (!["name", "displayName", "role1", "role2", "notes"].includes(key)) return;
+        editor.draft[key] = event.target.value;
+        if (["role1", "role2"].includes(key) && !editor.editedRoles.includes(key)) editor.editedRoles.push(key);
+        if (["name", "displayName"].includes(key)) document.getElementById("boxSensorPreset").value = "";
+        updateBoxEditorControls();
+    });
+    form.elements.type.addEventListener("change", () => {
+        editor.draft.type = form.elements.type.value;
+        if (!editor.item) {
             ["role1", "role2"].forEach((key, index) => {
-                if (!editedRoles.has(key)) form.elements[key].value = form.elements.type.value === "sensor" ? ["+", "-"][index] : "";
+                if (!editor.editedRoles.includes(key)) {
+                    editor.draft[key] = editor.draft.type === "sensor" ? ["+", "-"][index] : "";
+                    form.elements[key].value = editor.draft[key];
+                }
             });
+        }
+        updateBoxEditorControls();
+    });
+    document.getElementById("boxSensorPreset").addEventListener("change", event => {
+        if (!SENSOR_CONTEXT_OPTIONS.includes(event.target.value)) return;
+        const preset = createSensorPreset(event.target.value);
+        for (const key of ["name", "displayName"]) {
+            editor.draft[key] = preset[key];
+            form.elements[key].value = preset[key];
+        }
+    });
+    for (const target of ["node1", "node2"]) {
+        form.querySelector(`[data-box-pick="${target}"]`).addEventListener("click", () => startBoxEndpointPick(target));
+        form.elements[target].addEventListener("change", () => {
+            const id = form.elements[target].value;
+            if (!id) { editor.draft[target] = ""; updateBoxEditorControls(); }
+            else assignBoxDraftEndpoint(target, id);
+            form.elements[target].value = editor.draft[target];
         });
     }
+    updateBoxEditorControls();
     form.addEventListener("submit", saveBoxHardware);
 }
 
@@ -329,7 +455,8 @@ async function saveBoxHardware(event) {
     const editor = appState.boxEditor;
     if (!editor || !isEditMode() || boxPendingWrites) return;
     const form = event.currentTarget;
-    const payload = Object.fromEntries([...new FormData(form)].map(([key, value]) => [key, value.trim()]));
+    const payload = Object.fromEntries(["type", "name", "displayName", "node1", "role1", "node2", "role2", "notes"]
+        .map(key => [key, (editor.draft[key] || "").trim()]));
     if (!payload.name || !payload.displayName || !boxNodes.has(payload.node1) || !boxNodes.has(payload.node2) || payload.node1 === payload.node2) {
         document.getElementById("boxFormError").textContent = "Enter both names and choose two different sockets.";
         return;

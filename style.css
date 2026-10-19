@@ -1043,6 +1043,17 @@ textarea:focus-visible,
 .box-connections td span { color: var(--text-secondary); }
 .box-table-action { padding: 3px 5px; border: 0; background: transparent; color: var(--text-primary); cursor: pointer; font: inherit; text-decoration: underline; }
 .box-table-action:hover { background: var(--surface-secondary); }
+.box-pick-status { flex: 0 0 auto; margin: 0 14px 6px; padding: 8px; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: 0.8rem; overflow-wrap: anywhere; }
+.box-endpoint { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.box-endpoint > div { min-width: 0; overflow-wrap: anywhere; }
+.box-endpoint-label, .box-endpoint-value { display: block; font-size: 0.8rem; }
+.box-endpoint .mini-action-button { flex: 0 0 auto; }
+.box-endpoint.is-picking { border-color: var(--accent); background: var(--accent-soft); }
+.box-endpoint-fallback summary { cursor: pointer; font-size: 0.8rem; color: var(--text-secondary); }
+.box-endpoint-fallback .modal-field { display: grid; gap: 6px; margin-top: 8px; }
+.box-board.is-editing .box-node.is-dimmed { opacity: 0.55; }
+.box-board.is-picking .box-node { cursor: crosshair; }
+.box-node.is-pick-target .box-node-ring { stroke-dasharray: 8 5; }
 
 .grid-corner,
 .column-label,

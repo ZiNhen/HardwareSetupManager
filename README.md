@@ -177,6 +177,11 @@ The Hardware Connections table follows the active setup. Select a row or chip
 to view the same mapping; Edit/Delete actions appear only in Edit mode.
 New Sensor mappings start with endpoint roles `+` and `-`, which remain editable.
 Existing mappings and custom roles are unchanged.
+Sensor presets reuse the P-Box catalog. Select on Box / Change picks an endpoint
+directly from the board, with a socket dropdown available under Choose from list.
+Mouse clicks and Enter/Space update only the editor draft. Escape cancels the
+current pick without closing the editor; Cancel discards the draft. Only Save
+persists it. Changing project, setup or layout never saves an unfinished draft.
 
 P-Box Harness still uses the existing `projects.harness` field. Box Harness and
 Box mappings use only the new `box_project_settings` and `box_connections` tables.

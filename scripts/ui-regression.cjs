@@ -48,9 +48,16 @@ async function main() {
         const page = await context.newPage();
         page.setDefaultTimeout(4000);
         const errors = [];
+        const expectedConsoleErrors = [];
         const writes = [];
         page.on('pageerror', error => errors.push(error.message));
-        page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+        page.on('console', message => {
+            if (message.type() !== 'error') return;
+            // Fault-injection tests declare an exact HTTP error and URL; all other errors fail.
+            const expected = expectedConsoleErrors.find(item => item.text === message.text() && item.url === message.location().url);
+            if (expected) expected.seen++;
+            else errors.push(message.text());
+        });
         page.on('request', request => { if (!['GET', 'HEAD'].includes(request.method())) writes.push(request.method() + ' ' + request.url()); });
         const cell = id => page.locator(`[data-position-id="${id}"]`);
         const mode = value => page.locator(`[data-interaction-mode="${value}"]`).click();
@@ -325,7 +332,11 @@ async function main() {
             await page.waitForTimeout(250); assert.equal(writes.length, before);
         });
         await require('./box-regression.cjs')({ page, api, check, base, sandbox, writes, child });
-        await check('no browser console errors', async () => assert.deepEqual(errors, []));
+        await require('./box-pick-regression.cjs')({ page, api, check, base, sandbox, writes, child, expectedConsoleErrors });
+        await check('no unexpected browser console errors', async () => {
+            assert.deepEqual(errors, []);
+            expectedConsoleErrors.forEach(item => assert.equal(item.seen, 1, 'expected HTTP conflict must be accounted for exactly once'));
+        });
         console.log('Screenshots and isolated test DB: ' + sandbox);
         assert.deepEqual(failures, [], 'Failed checks');
     } finally {
