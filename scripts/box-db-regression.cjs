@@ -55,6 +55,14 @@ try {
         assert.throws(() => store.saveBoxConnection(project.id, 'checkpoint', null, invalid), error => error.status === 400);
     }
     store.saveBoxConnection(project.id, 'container', null, { ...item, type: 'mechanicalSwitch', node1: 'G1-B33', node2: 'G4-B33' });
+    const boxSchema = database.prepare("SELECT sql FROM sqlite_master WHERE name IN ('box_connections', 'box_project_settings') ORDER BY name").all();
+    const single = store.saveBoxConnection(project.id, 'checkpoint', null, { ...item, type: 'mechanicalSwitch', node1: 'G1-B15', node2: '', role1: '', role2: '' }).setups.checkpoint.connections.at(-1);
+    assert.equal(single.node2, '');
+    assert.throws(() => store.saveBoxConnection(project.id, 'checkpoint', null, { ...item, node2: '' }), error => error.status === 400);
+    assert.throws(() => store.saveBoxConnection(project.id, 'checkpoint', null, { ...single, node2: 'bad' }), error => error.status === 400);
+    assert.throws(() => store.saveBoxConnection(project.id, 'checkpoint', null, { ...single, node2: single.node1 }), error => error.status === 400);
+    assert.deepEqual(database.prepare("SELECT sql FROM sqlite_master WHERE name IN ('box_connections', 'box_project_settings') ORDER BY name").all(), boxSchema);
+    console.log('PASS one-node Mechanical validation with unchanged Box schema');
     store.deleteBoxConnection(project.id, 'checkpoint', saved.id, { revision: 2 });
     assert.equal(store.getBox(project.id).setups.container.connections.length, 1);
     assert.equal(snapshot(database), before, 'Box CRUD changed legacy records');
@@ -62,10 +70,15 @@ try {
 
     database.close(); database = null;
     delete require.cache[require.resolve(path.join(sandbox, 'db.js'))];
-    database = require(path.join(sandbox, 'db.js')).openDatabase();
+    const reopened = require(path.join(sandbox, 'db.js'));
+    database = reopened.openDatabase();
     assert.equal(fs.readdirSync(path.join(sandbox, 'backups')).length, 1, 'idempotent startup must not repeat schema backups');
     assert.equal(snapshot(database), before);
     console.log('PASS idempotent initialization');
+    const imported = reopened.createProject({ project: { name: 'Mechanical round trip' }, box: reopened.getBox(project.id) });
+    assert.equal(reopened.getBox(imported.id).setups.checkpoint.connections.at(-1).node2, '');
+    assert.equal(reopened.getBox(imported.id).setups.container.connections[0].node2, 'G4-B33');
+    console.log('PASS one-node and legacy two-node Mechanical import/export round trip');
 } finally {
     if (database) database.close();
     oldConnection.close();

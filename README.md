@@ -171,17 +171,23 @@ Tailscale and Cloudflare Tunnel are deployment options, not source-code dependen
 
 Hardware Layout contains P-Box and Box views. Checkpoint and Container each have
 independent Box mappings. In Edit mode, Add Hardware creates a mapping between
-two fixed sockets; selecting a hardware chip highlights its endpoints and roles.
+one or two fixed sockets; selecting a hardware chip highlights its endpoints and roles.
 View mode and layout/selection changes do not write data.
-The Hardware Connections table follows the active setup. Select a row or chip
-to view the same mapping; Edit/Delete actions appear only in Edit mode.
-New Sensor mappings start with endpoint roles `+` and `-`, which remain editable.
-Existing mappings and custom roles are unchanged.
-Sensor presets reuse the P-Box catalog. Select on Box / Change picks an endpoint
-directly from the board, with a socket dropdown available under Choose from list.
-Mouse clicks and Enter/Space update only the editor draft. Escape cancels the
-current pick without closing the editor; Cancel discards the draft. Only Save
-persists it. Changing project, setup or layout never saves an unfinished draft.
+Hardware rows are ordered Sensors, AOD, Switches; P/M badges distinguish the two
+switch types. Presets and generic defaults reuse the P-Box catalog. The Hardware
+Connections table and chips select the same mapping; Edit/Delete are Edit-only.
+New Sensor, AOD and Physical Switch mappings pick `+` then `-` and save once after
+the second valid socket. New Mechanical Switch mappings pick one socket and save
+once, without polarity. Mouse and Enter/Space are supported. Metadata-only edits
+retain Save. Incomplete drafts, selections, navigation and Cancel never write.
+Click a selected mapping's socket (Edit mode) or Change to re-pick that endpoint;
+the replacement saves once. Escape cancels the re-pick and restores the saved
+mapping. Writes are guarded while pending; stale revisions still return 409.
+Existing two-socket Mechanical mappings remain unchanged on load, metadata edit,
+export and import. Explicitly re-picking one remaps it to a single socket.
+Show All marks occupied sockets neutrally, without polarity or connection lines.
+Selecting hardware shows only its endpoint lines, anchored to its chip and actual
+socket centers, updating on scroll/resize. Polarity markers never recolor sockets.
 
 P-Box Harness still uses the existing `projects.harness` field. Box Harness and
 Box mappings use only the new `box_project_settings` and `box_connections` tables.

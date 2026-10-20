@@ -1,6 +1,8 @@
 /* Box UI uses the existing appState, storage, write queue, modes and detail panel. */
 let boxDom;
 let boxPendingWrites = 0;
+let boxLineFrame = 0;
+let boxSocketBlockedUntil = 0;
 const boxHarnessTimers = new Map();
 const boxNodes = new Map(BOX_TEMPLATE.nodes.map(node => [node.id, node]));
 
@@ -39,8 +41,13 @@ function validBoxImport(value) {
         const items = value.setups[setup]?.connections;
         return Array.isArray(items) && items.every(item => isPlainObject(item)
             && BOX_TEMPLATE.types.includes(item.type) && normalizeString(item.name) && normalizeString(item.displayName)
-            && boxNodes.has(item.node1) && boxNodes.has(item.node2) && item.node1 !== item.node2);
+            && validBoxEndpoints(item));
     });
+}
+
+function validBoxEndpoints(item) {
+    return boxNodes.has(item.node1) && item.node1 !== item.node2
+        && (boxNodes.has(item.node2) || (item.type === "mechanicalSwitch" && !normalizeString(item.node2)));
 }
 
 function initializeBox() {
@@ -56,11 +63,21 @@ function initializeBox() {
     boxDom.harness.addEventListener("input", scheduleBoxHarnessSave);
     boxDom.harness.addEventListener("blur", () => { boxDom.harness.value = boxDom.harness.value.trim(); });
     boxDom.board.innerHTML = createBoxBoardMarkup();
+    boxDom.lines = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    boxDom.lines.id = "boxConnectionLines";
+    boxDom.lines.setAttribute("aria-hidden", "true");
+    document.body.appendChild(boxDom.lines);
+    window.addEventListener("resize", scheduleBoxLines);
+    document.addEventListener("scroll", scheduleBoxLines, true);
+    new ResizeObserver(scheduleBoxLines).observe(boxDom.view);
     boxDom.board.querySelectorAll("[data-box-node]").forEach(element => {
         const node = boxNodes.get(element.dataset.boxNode);
-        element.addEventListener("click", () => selectBoxNode(node.id));
+        element.addEventListener("click", event => { if (event.detail < 2) selectBoxNode(node.id); });
         element.addEventListener("keydown", event => {
-            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectBoxNode(node.id); }
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                if (!event.repeat) selectBoxNode(node.id);
+            }
         });
         element.addEventListener("mouseenter", event => showBoxNodeTooltip(node, event));
         element.addEventListener("focus", event => showBoxNodeTooltip(node, event));
@@ -80,7 +97,7 @@ function createBoxBoardMarkup() {
         <text y="64">${item.label}</text></g>`).join("");
     const nodes = BOX_TEMPLATE.nodes.map(node => `<g class="box-node box-socket-${node.color}" data-box-node="${node.id}" transform="translate(${node.x} ${node.y})"
         tabindex="0" role="button" aria-describedby="hardwareTooltip" aria-label="${escapeAttribute(`${node.id}, ${node.label}, ${BOX_TEMPLATE.colors[node.color]} ${node.kind}`)}">
-        <circle class="box-node-ring" r="37"/><circle class="box-socket" r="30"/>
+        <circle class="box-occupied-ring" r="34"/><circle class="box-node-ring" r="37"/><circle class="box-socket" r="30"/>
         <circle class="box-socket-hole" r="13"/><path class="box-contact" d="M-6 -8 -9 6 M7 -9 9 6"/>
         ${node.sharedLabel ? "" : `<text class="box-node-label" y="64">${node.label}</text>`}
         <g class="box-role" hidden transform="translate(${node.x < BOX_TEMPLATE.groups.find(group => group.id === node.group).switchX ? 53 : -53} 0)"><rect x="-27" y="-52" width="54" height="21" rx="4"/><text y="-37"></text></g>
@@ -119,6 +136,7 @@ function renderBoxHarness() {
 
 function renderBoxLayout() {
     if (!boxDom) return;
+    scheduleBoxLines();
     const active = appState.activeLayout === "box";
     boxDom.view.hidden = !active;
     dom.mapScroll.hidden = active;
@@ -141,16 +159,45 @@ function renderBoxLayout() {
     boxDom.add.disabled = Boolean(boxPendingWrites);
     const focusedChip = document.activeElement?.dataset.boxHardware;
     boxDom.chips.replaceChildren();
-    boxConnections().forEach(item => {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "box-chip";
-        chip.dataset.boxHardware = String(item.id);
-        chip.textContent = item.displayName;
-        chip.title = item.name;
-        chip.setAttribute("aria-pressed", String(item.id === appState.selectedBoxHardware));
-        chip.addEventListener("click", () => selectBoxHardware(item.id));
-        boxDom.chips.appendChild(chip);
+    const categories = [
+        { label: "Sensors", types: ["sensor"] }, { label: "AOD", types: ["aod"] },
+        { label: "Switches", types: ["physicalSwitch", "mechanicalSwitch"] }
+    ];
+    categories.forEach(category => {
+        const items = boxConnections().filter(item => category.types.includes(item.type));
+        if (!items.length) return;
+        const row = document.createElement("div");
+        row.className = "box-hardware-category";
+        row.dataset.boxCategory = category.label;
+        const heading = document.createElement("h3");
+        heading.textContent = category.label;
+        row.appendChild(heading);
+        const chips = document.createElement("div");
+        chips.className = "box-category-chips";
+        row.appendChild(chips);
+        items.forEach(item => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "box-chip";
+            chip.dataset.boxHardware = String(item.id);
+            const name = document.createElement("span");
+            name.className = "box-chip-name";
+            name.textContent = item.displayName;
+            if (["physicalSwitch", "mechanicalSwitch"].includes(item.type)) {
+                const badge = document.createElement("span");
+                badge.className = "box-switch-badge";
+                badge.textContent = item.type === "physicalSwitch" ? "P" : "M";
+                badge.setAttribute("aria-hidden", "true");
+                chip.appendChild(badge);
+                chip.setAttribute("aria-label", `${item.displayName}, ${getTypeLabel(item.type)}`);
+            }
+            chip.appendChild(name);
+            chip.title = `${item.name} | ${getTypeLabel(item.type)}`;
+            chip.setAttribute("aria-pressed", String(item.id === appState.selectedBoxHardware));
+            chip.addEventListener("click", () => selectBoxHardware(item.id));
+            chips.appendChild(chip);
+        });
+        boxDom.chips.appendChild(row);
     });
     const all = document.createElement("button");
     all.type = "button";
@@ -160,7 +207,7 @@ function renderBoxLayout() {
     all.setAttribute("aria-pressed", String(!appState.selectedBoxHardware && !appState.selectedBoxNode));
     all.addEventListener("click", () => selectBoxHardware(null));
     boxDom.chips.appendChild(all);
-    if (focusedChip) [...boxDom.chips.children].find(button => button.dataset.boxHardware === focusedChip)?.focus();
+    if (focusedChip) boxDom.chips.querySelector(`[data-box-hardware="${focusedChip}"]`)?.focus({ preventScroll: true });
     renderBoxNodes();
     renderBoxConnections();
     renderBoxDetails();
@@ -171,22 +218,62 @@ function renderBoxNodes() {
     const selected = editor ? editor.draft : selectedBoxConnection();
     const pickTarget = editor?.pickTarget;
     boxDom.pickStatus.hidden = !pickTarget;
-    boxDom.pickStatus.textContent = pickTarget ? `Selecting ${boxDraftEndpointLabel(pickTarget)} - click a Box socket` : "";
+    boxDom.pickStatus.textContent = pickTarget ? `Select ${boxDraftEndpointLabel(pickTarget)} for ${selected.displayName || selected.name || "hardware"}${editor.item?.type === "mechanicalSwitch" && editor.item.node2 ? " (remap to one socket)" : ""}` : "";
     boxDom.board.classList.toggle("is-picking", Boolean(pickTarget));
     boxDom.board.classList.toggle("is-editing", Boolean(editor));
     boxDom.board.querySelectorAll("[data-box-node]").forEach(element => {
         const id = element.dataset.boxNode;
         const endpoint = selected?.node1 === id ? 1 : selected?.node2 === id ? 2 : 0;
+        element.classList.toggle("is-occupied", boxConnections().some(item => item.node1 === id || item.node2 === id));
+        element.classList.toggle("is-replacing", Boolean(editor?.repick) && editor.item[pickTarget] === id);
         const highlighted = Boolean(endpoint) || (!editor && appState.selectedBoxNode === id);
         element.classList.toggle("is-highlighted", highlighted);
         element.classList.toggle("is-pick-target", Boolean(pickTarget) && selected[pickTarget] === id);
         element.classList.toggle("is-dimmed", Boolean(selected?.node1 || selected?.node2) && !endpoint);
         element.setAttribute("aria-pressed", String(highlighted));
         const badge = element.querySelector(".box-role");
-        badge.toggleAttribute("hidden", !endpoint);
+        badge.toggleAttribute("hidden", !endpoint || selected.type === "mechanicalSwitch");
         const role = endpoint ? selected[`role${endpoint}`] || String(endpoint) : "";
+        badge.classList.toggle("is-positive", role === "+");
+        badge.classList.toggle("is-negative", role === "-");
         badge.querySelector("text").textContent = role.length > 5 ? role.slice(0, 4) + "..." : role;
     });
+    scheduleBoxLines();
+}
+
+function scheduleBoxLines() {
+    if (boxLineFrame) return;
+    boxLineFrame = requestAnimationFrame(() => { boxLineFrame = 0; renderBoxLines(); });
+}
+
+function renderBoxLines() {
+    boxDom.lines.replaceChildren();
+    const selected = selectedBoxConnection();
+    if (appState.activeLayout !== "box" || appState.boxEditor || !selected || !boxDom.view.getClientRects().length) return;
+    const chip = boxDom.chips.querySelector(`[data-box-hardware="${selected.id}"]`);
+    if (!chip) return;
+    const source = chip.getBoundingClientRect();
+    const chips = boxDom.chips.getBoundingClientRect();
+    if (source.top < chips.top || source.bottom > chips.bottom) return;
+    const board = boxDom.board.parentElement.getBoundingClientRect();
+    const x = source.x + source.width / 2;
+    const y = source.bottom;
+    boxDom.lines.setAttribute("viewBox", `0 0 ${innerWidth} ${innerHeight}`);
+    // Clip to the visible chip/board region so lines never cover adjacent panels or the table.
+    boxDom.lines.innerHTML = `<defs><clipPath id="boxLineClip"><rect x="${board.x}" y="${chips.y}" width="${board.width}" height="${Math.max(0, board.bottom - chips.y)}"/></clipPath></defs>`;
+    for (const target of ["node1", "node2"]) {
+        if (!selected[target]) continue;
+        const socket = boxDom.board.querySelector(`[data-box-node="${selected[target]}"] .box-socket`).getBoundingClientRect();
+        const tx = socket.x + socket.width / 2;
+        const ty = socket.y + socket.height / 2;
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        line.dataset.boxLine = target;
+        line.dataset.node = selected[target];
+        line.dataset.anchor = JSON.stringify([x, y, tx, ty]);
+        line.setAttribute("d", `M${x} ${y} C${x} ${y + 24} ${tx} ${ty - 32} ${tx} ${ty}`);
+        line.setAttribute("clip-path", "url(#boxLineClip)");
+        boxDom.lines.appendChild(line);
+    }
 }
 
 function renderBoxConnections() {
@@ -243,8 +330,15 @@ function selectBoxHardware(id) {
 }
 
 function selectBoxNode(id) {
+    if (boxPendingWrites || performance.now() < boxSocketBlockedUntil) return;
     if (appState.boxEditor) {
         if (appState.boxEditor.pickTarget && !boxPendingWrites) assignBoxDraftEndpoint(appState.boxEditor.pickTarget, id);
+        return;
+    }
+    const selected = selectedBoxConnection();
+    if (isEditMode() && selected && [selected.node1, selected.node2].includes(id)) {
+        openBoxEditor(selected);
+        startBoxEndpointPick(selected.type === "mechanicalSwitch" || id === selected.node1 ? "node1" : "node2");
         return;
     }
     const matches = boxConnections().filter(item => item.node1 === id || item.node2 === id);
@@ -258,7 +352,10 @@ function selectBoxNode(id) {
 function showBoxNodeTooltip(node, event) {
     const matches = boxConnections().filter(item => item.node1 === node.id || item.node2 === node.id);
     dom.hardwareTooltip.innerHTML = `<strong>${escapeHtml(node.id)}</strong><div>${escapeHtml(node.label)} | ${BOX_TEMPLATE.colors[node.color]} ${node.kind}</div>
-        ${matches.map(item => `<div>${escapeHtml(item.displayName)} - ${escapeHtml(item.name)} (${escapeHtml(getTypeLabel(item.type))})</div>`).join("") || "<div>Unmapped</div>"}`;
+        ${matches.map(item => {
+            const role = item.type === "mechanicalSwitch" ? "" : item.node1 === node.id ? item.role1 : item.role2;
+            return `<div>${escapeHtml(item.displayName)} - ${escapeHtml(item.name)} (${escapeHtml(getTypeLabel(item.type))})${role ? ` | ${escapeHtml(role)}` : ""}</div>`;
+        }).join("") || "<div>Unmapped</div>"}`;
     dom.hardwareTooltip.hidden = false;
     if (event.type === "focus") {
         const rect = event.currentTarget.getBoundingClientRect();
@@ -295,6 +392,7 @@ function renderBoxDetails() {
     [["Hardware Name", selected.name], ["Display Name", selected.displayName], ["Type", getTypeLabel(selected.type)],
         ["Endpoint 1", boxEndpointLabel(selected.node1, selected.role1)], ["Endpoint 2", boxEndpointLabel(selected.node2, selected.role2)],
         ["Box Harness", appState.box.settings.harness || "-"], ["Notes", selected.notes || "-"]]
+        .filter(([label]) => label !== "Endpoint 2" || selected.node2)
         .forEach(([label, value]) => details.appendChild(createDetailRow(label, value)));
     container.appendChild(details);
     if (isEditMode()) container.appendChild(createActionGroup([
@@ -305,17 +403,22 @@ function renderBoxDetails() {
 
 function openBoxEditor(item = null) {
     if (!isEditMode() || boxPendingWrites) return;
+    boxSocketBlockedUntil = 0;
+    if (item) {
+        appState.selectedBoxHardware = item.id;
+        appState.selectedBoxNode = null;
+    }
     appState.boxEditor = {
         projectId: currentProjectId, setup: appState.activeSetup, item: item ? { ...item } : null,
         draft: item ? { ...item } : { type: "sensor", name: "", displayName: "", node1: "", node2: "", role1: "+", role2: "-", notes: "" },
-        pickTarget: null, editedRoles: [], error: ""
+        pickTarget: null, editedRoles: [], error: "", repick: false, saving: false, failed: false
     };
-    renderBoxNodes();
-    renderBoxDetails();
+    renderBoxLayout();
     document.getElementById("boxName").focus();
 }
 
 function closeBoxEditor() {
+    if (appState.boxEditor?.saving) return;
     appState.boxEditor = null;
     hideTooltip();
     renderBoxLayout();
@@ -323,9 +426,10 @@ function closeBoxEditor() {
 
 function boxDraftEndpointLabel(target) {
     const draft = appState.boxEditor.draft;
+    if (draft.type === "mechanicalSwitch") return "socket";
     const role = draft[target === "node1" ? "role1" : "role2"];
-    if (draft.type === "sensor" && role === "+") return "Positive (+)";
-    if (draft.type === "sensor" && role === "-") return "Negative (-)";
+    if (role === "+") return "Positive (+)";
+    if (role === "-") return "Negative (-)";
     return `Endpoint ${target === "node1" ? "1" : "2"}${role ? ` (${role})` : ""}`;
 }
 
@@ -335,6 +439,13 @@ function updateBoxEditorControls() {
     if (!editor || !form) return;
     document.getElementById("boxSensorPresetField").hidden = editor.draft.type !== "sensor";
     document.getElementById("boxFormError").textContent = editor.error;
+    const mechanical = editor.draft.type === "mechanicalSwitch";
+    const singleMechanical = mechanical && (!editor.item?.node2 || editor.repick);
+    form.elements.role1.closest("label").hidden = mechanical;
+    form.elements.role2.closest("label").hidden = mechanical;
+    form.elements.node2.closest("label").hidden = singleMechanical;
+    form.querySelector('[data-box-endpoint="node2"]').hidden = singleMechanical;
+    form.querySelector('button[type="submit"]').hidden = !editor.item && !editor.failed;
     for (const target of ["node1", "node2"]) {
         const region = form.querySelector(`[data-box-endpoint="${target}"]`);
         region.classList.toggle("is-picking", editor.pickTarget === target);
@@ -344,7 +455,9 @@ function updateBoxEditorControls() {
         button.textContent = editor.pickTarget === target ? "Selecting..." : editor.draft[target] ? "Change" : "Select on Box";
         button.setAttribute("aria-label", `${editor.draft[target] ? "Change" : "Select"} ${boxDraftEndpointLabel(target)} on Box`);
         button.setAttribute("aria-pressed", String(editor.pickTarget === target));
+        button.hidden = mechanical && target === "node2";
     }
+    form.querySelectorAll("input, select, textarea, button").forEach(control => { control.disabled = editor.saving; });
     renderBoxNodes();
 }
 
@@ -352,6 +465,8 @@ function startBoxEndpointPick(target) {
     const editor = appState.boxEditor;
     if (!editor || !isEditMode() || boxPendingWrites || !["node1", "node2"].includes(target)) return;
     editor.pickTarget = target;
+    editor.repick = Boolean(editor.item);
+    editor.failed = false;
     editor.error = "";
     updateBoxEditorControls();
     const id = editor.draft[target] || BOX_TEMPLATE.nodes[0].id;
@@ -361,6 +476,8 @@ function startBoxEndpointPick(target) {
 }
 
 function cancelBoxEndpointPick() {
+    if (appState.boxEditor.saving) return;
+    if (appState.boxEditor.repick) { closeBoxEditor(); return; }
     const target = appState.boxEditor.pickTarget;
     appState.boxEditor.pickTarget = null;
     appState.boxEditor.error = "";
@@ -369,20 +486,48 @@ function cancelBoxEndpointPick() {
     document.querySelector(`[data-box-pick="${target}"]`)?.focus();
 }
 
-function assignBoxDraftEndpoint(target, id) {
+function assignBoxDraftEndpoint(target, id, fromList = false) {
     const editor = appState.boxEditor;
     if (!editor || !isEditMode() || boxPendingWrites) return;
-    if (!boxNodes.has(id) || editor.draft[target === "node1" ? "node2" : "node1"] === id) {
+    const mechanicalRemap = editor.draft.type === "mechanicalSwitch" && (!editor.item || editor.repick);
+    if (!boxNodes.has(id) || (!mechanicalRemap && editor.draft[target === "node1" ? "node2" : "node1"] === id)) {
         editor.error = "Choose two different Box sockets.";
         updateBoxEditorControls();
         return;
     }
     editor.draft[target] = id;
-    editor.pickTarget = null;
+    if (mechanicalRemap) {
+        editor.draft.node1 = id;
+        editor.draft.node2 = "";
+        editor.draft.role1 = editor.draft.role2 = "";
+    } else if (!editor.item) {
+        editor.draft.role1 = "+";
+        editor.draft.role2 = "-";
+    }
     editor.error = "";
     hideTooltip();
+    // Metadata-only edits keep their explicit Save; new mappings and endpoint re-picks save once complete.
+    const complete = validBoxEndpoints(editor.draft);
+    editor.pickTarget = complete ? null : editor.draft.node1 ? "node2" : "node1";
     renderBoxDetails();
-    document.querySelector(`[data-box-pick="${target}"]`).focus();
+    if (complete && (!editor.item || editor.repick)) {
+        saveBoxHardware();
+    } else if (!fromList) {
+        boxDom.board.querySelector(`[data-box-node="${id}"]`).focus({ preventScroll: true });
+    }
+}
+
+function beginNewBoxMapping() {
+    const editor = appState.boxEditor;
+    if (!editor || editor.item || editor.saving || !editor.draft.name.trim() || !editor.draft.displayName.trim()) return;
+    editor.pickTarget = "node1";
+    editor.failed = false;
+    editor.error = "";
+    const mechanical = editor.draft.type === "mechanicalSwitch";
+    editor.draft.role1 = mechanical ? "" : "+";
+    editor.draft.role2 = mechanical ? "" : "-";
+    editor.draft.node1 = editor.draft.node2 = "";
+    renderBoxDetails();
 }
 
 function renderBoxEditor(container) {
@@ -414,18 +559,19 @@ function renderBoxEditor(container) {
         if (!["name", "displayName", "role1", "role2", "notes"].includes(key)) return;
         editor.draft[key] = event.target.value;
         if (["role1", "role2"].includes(key) && !editor.editedRoles.includes(key)) editor.editedRoles.push(key);
-        if (["name", "displayName"].includes(key)) document.getElementById("boxSensorPreset").value = "";
+        if (["name", "displayName"].includes(key)) {
+            document.getElementById("boxSensorPreset").value = "";
+            if (!editor.item && !editor.pickTarget && !editor.draft.node1 && !editor.draft.node2
+                && editor.draft.name.trim() && editor.draft.displayName.trim()) editor.pickTarget = "node1";
+        }
         updateBoxEditorControls();
     });
     form.elements.type.addEventListener("change", () => {
         editor.draft.type = form.elements.type.value;
         if (!editor.item) {
-            ["role1", "role2"].forEach((key, index) => {
-                if (!editor.editedRoles.includes(key)) {
-                    editor.draft[key] = editor.draft.type === "sensor" ? ["+", "-"][index] : "";
-                    form.elements[key].value = editor.draft[key];
-                }
-            });
+            Object.assign(editor.draft, createQuickItem(editor.draft.type));
+            beginNewBoxMapping();
+            return;
         }
         updateBoxEditorControls();
     });
@@ -436,13 +582,14 @@ function renderBoxEditor(container) {
             editor.draft[key] = preset[key];
             form.elements[key].value = preset[key];
         }
+        if (!editor.item) beginNewBoxMapping();
     });
     for (const target of ["node1", "node2"]) {
         form.querySelector(`[data-box-pick="${target}"]`).addEventListener("click", () => startBoxEndpointPick(target));
         form.elements[target].addEventListener("change", () => {
             const id = form.elements[target].value;
             if (!id) { editor.draft[target] = ""; updateBoxEditorControls(); }
-            else assignBoxDraftEndpoint(target, id);
+            else assignBoxDraftEndpoint(target, id, true);
             form.elements[target].value = editor.draft[target];
         });
     }
@@ -451,18 +598,21 @@ function renderBoxEditor(container) {
 }
 
 async function saveBoxHardware(event) {
-    event.preventDefault();
+    event?.preventDefault();
     const editor = appState.boxEditor;
-    if (!editor || !isEditMode() || boxPendingWrites) return;
-    const form = event.currentTarget;
+    if (!editor || !isEditMode() || boxPendingWrites || editor.saving) return;
     const payload = Object.fromEntries(["type", "name", "displayName", "node1", "role1", "node2", "role2", "notes"]
         .map(key => [key, (editor.draft[key] || "").trim()]));
-    if (!payload.name || !payload.displayName || !boxNodes.has(payload.node1) || !boxNodes.has(payload.node2) || payload.node1 === payload.node2) {
-        document.getElementById("boxFormError").textContent = "Enter both names and choose two different sockets.";
+    if (!payload.name || !payload.displayName || !validBoxEndpoints(payload)) {
+        document.getElementById("boxFormError").textContent = payload.type === "mechanicalSwitch"
+            ? "Enter both names and choose a socket."
+            : "Enter both names and choose two different sockets.";
         return;
     }
     if (editor.item) payload.revision = editor.item.revision;
-    form.querySelectorAll("button").forEach(button => { button.disabled = true; });
+    editor.saving = true;
+    editor.pickTarget = null;
+    updateBoxEditorControls();
     boxPendingWrites++;
     setSaveIndicator("Saving...", "saving");
     try {
@@ -478,15 +628,19 @@ async function saveBoxHardware(event) {
         }
         showToast("Box hardware saved");
     } catch (error) {
+        editor.failed = true;
+        editor.error = getSaveErrorMessage(error);
         showToast(getSaveErrorMessage(error));
-        setSaveIndicator(error.status === 409 ? "Conflict" : "Failed to save", "error");
+        if (currentProjectId === editor.projectId) setSaveIndicator(error.status === 409 ? "Conflict" : "Failed to save", "error");
         if (currentProjectId === editor.projectId && appState.boxEditor === editor) {
-            document.getElementById("boxFormError").textContent = getSaveErrorMessage(error);
-            form.querySelectorAll("button").forEach(button => { button.disabled = false; });
+            document.getElementById("boxFormError").textContent = editor.error;
         }
     } finally {
+        editor.saving = false;
         boxPendingWrites--;
+        boxSocketBlockedUntil = performance.now() + 300;
         boxDom.add.disabled = Boolean(boxPendingWrites);
+        if (appState.boxEditor === editor) updateBoxEditorControls();
     }
 }
 

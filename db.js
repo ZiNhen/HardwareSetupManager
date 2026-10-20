@@ -136,7 +136,8 @@ function normalizeBoxConnection(value) {
     const item = Object.fromEntries(["type", "name", "displayName", "node1", "role1", "node2", "role2", "notes"]
         .map(key => [key, cleanString(value[key])]));
     if (!BOX_TEMPLATE.types.includes(item.type) || !item.name || !item.displayName) throw boxError("Type, hardware name and display name are required");
-    if (!BOX_NODE_IDS.has(item.node1) || !BOX_NODE_IDS.has(item.node2) || item.node1 === item.node2) throw boxError("Choose two different Box sockets");
+    const singleMechanical = item.type === "mechanicalSwitch" && !item.node2;
+    if (!BOX_NODE_IDS.has(item.node1) || (!singleMechanical && !BOX_NODE_IDS.has(item.node2)) || item.node1 === item.node2) throw boxError("Choose valid, different Box sockets");
     return item;
 }
 

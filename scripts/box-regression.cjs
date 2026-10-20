@@ -21,7 +21,7 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         await chooseFromList('node2', node2);
     };
     const save = async () => {
-        await page.locator('#boxEditorForm button[type="submit"]').click();
+        if (await page.locator('#boxEditorForm button[type="submit"]').isVisible()) await page.locator('#boxEditorForm button[type="submit"]').click();
         await page.locator('#boxEditorForm').waitFor({ state: 'hidden' });
     };
     let first;
@@ -68,16 +68,16 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         assert.equal(await field('role2').inputValue(), '-');
         for (const type of ['aod', 'physicalSwitch', 'mechanicalSwitch']) {
             await field('type').selectOption(type);
-            assert.equal(await field('role1').inputValue(), '');
-            assert.equal(await field('role2').inputValue(), '');
+            assert.equal(await field('role1').inputValue(), type === 'mechanicalSwitch' ? '' : '+');
+            assert.equal(await field('role2').inputValue(), type === 'mechanicalSwitch' ? '' : '-');
         }
         await field('type').selectOption('sensor');
         assert.equal(await field('role1').inputValue(), '+');
         assert.equal(await field('role2').inputValue(), '-');
         await field('role1').fill('signal'); await field('role2').fill('');
         await field('type').selectOption('aod'); await field('type').selectOption('sensor');
-        assert.equal(await field('role1').inputValue(), 'signal');
-        assert.equal(await field('role2').inputValue(), '');
+        assert.equal(await field('role1').inputValue(), '+');
+        assert.equal(await field('role2').inputValue(), '-');
         await page.locator('#cancelBoxEditor').click();
         assert.equal(writes.length, before);
     });
@@ -86,7 +86,6 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         await mode('edit'); await page.locator('#addBoxHardwareButton').click();
         await fill('FIS', 'G2-B59', 'G2-B59');
         const before = writes.length;
-        await page.locator('#boxEditorForm button[type="submit"]').click();
         assert.match(await page.locator('#boxFormError').innerText(), /different/);
         assert.equal(writes.length, before);
         await chooseFromList('node2', 'G2-A10'); await save();
@@ -174,15 +173,13 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         assert.equal(await page.locator('#boxConnectionsTitle').textContent(), 'Hardware Connections (Container - Box)');
         assert.equal(await page.locator('#boxConnectionsTable [data-box-row]').count(), 0);
         assert.equal(await page.locator('#boxChips').getByRole('button', { name: 'FIS', exact: true }).count(), 0);
-        await page.locator('#addBoxHardwareButton').click(); await fill('DBS', 'G1-B33', 'G4-B33');
-        await page.locator('#boxEditorForm [name="type"]').selectOption('mechanicalSwitch');
-        await page.locator('#boxEditorForm [name="role1"]').fill('COM');
-        await page.locator('#boxEditorForm [name="role2"]').fill('NO'); await save();
+        await api(`${boxPath}/container/connections`, { type: 'mechanicalSwitch', name: 'DBS hardware', displayName: 'DBS', node1: 'G1-B33', node2: 'G4-B33', role1: 'COM', role2: 'NO', notes: '' });
+        await page.evaluate(() => pollProjectUpdates());
         await page.reload(); await page.locator('.workspace').waitFor({ state: 'visible' }); await layout('box');
         assert.equal(await page.locator('#boxHarnessInput').inputValue(), 'Box harness 42');
         await page.locator('#boxChips').getByRole('button', { name: 'FIS', exact: true }).click();
         assert.match(await page.locator('#positionDetailsContent').innerText(), /Revised mapping/);
-        await setup('container'); await page.locator('#boxChips').getByRole('button', { name: 'DBS', exact: true }).click();
+        await setup('container'); await page.locator('#boxChips').getByRole('button', { name: 'DBS, Mechanical Switch', exact: true }).click();
         assert.match(await page.locator('#boxConnectionsTable').innerText(), /COM/);
         assert.match(await page.locator('#boxConnectionsTable').innerText(), /NO/);
         assert.doesNotMatch(await page.locator('#boxConnectionsTable').innerText(), /FIS/);
@@ -248,7 +245,7 @@ module.exports = async function testBox({ page, api, check, base, sandbox, write
         await page.reload(); await page.locator('.workspace').waitFor({ state: 'visible' }); await layout('box');
         assert.equal(await page.locator('#boxChips').getByRole('button', { name: 'FIS', exact: true }).count(), 0);
         await setup('container');
-        assert.equal(await page.locator('#boxChips').getByRole('button', { name: 'DBS', exact: true }).count(), 1);
+        assert.equal(await page.locator('#boxChips').getByRole('button', { name: 'DBS, Mechanical Switch', exact: true }).count(), 1);
         const before = writes.length;
         await page.locator('#allProjectsButton').click(); await page.locator('.project-path-current').waitFor();
         assert.equal(await page.locator('.project-path-current').innerText(), 'Child');
